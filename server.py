@@ -12,6 +12,7 @@ from .autopcr.db.database import db
 from .autopcr.util.unit_recognizer import instance as unit_recognizer
 from .autopcr.module.accountmgr import Account, AccountManager, instance as usermgr
 from .autopcr.db.dbstart import db_start
+from .autopcr.core.region import REGION_TW
 from .autopcr.core.clientpool import instance as clientpool
 from .autopcr.util.draw import instance as drawer
 from .autopcr.util.excel_export import export_excel
@@ -115,6 +116,7 @@ sv = Service(
 @on_startup
 async def init():
     await db_start()
+    await db_start(REGION_TW)
     from .autopcr.module.crons import queue_crons
     queue_crons()
 

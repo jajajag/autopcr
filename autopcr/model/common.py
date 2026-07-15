@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Union
 from .enums import *
 from pydantic import BaseModel, Field
 
@@ -230,7 +230,9 @@ class VersusResult(BaseModel):
     win_or_lose: int = None
     opponent_user: OpponentUser = None
 class DeckData(BaseModel):
-    deck_number: ePartyType = None
+    # Regional servers can introduce party types before the generated enum is
+    # updated.  Preserve known values as ePartyType and accept new numeric ones.
+    deck_number: Union[ePartyType, int] = None
     unit_id_1: int = None
     unit_id_2: int = None
     unit_id_3: int = None
@@ -956,6 +958,16 @@ class ExchangePointBonusInfo(BaseModel):
     balloon_id: int = None
     balloon_text_color: str = None
     bonus_list: List[ExchangePointMilestoneData] = None
+class GachaBonusTargetUnitInfo(BaseModel):
+    target_unit_id: int = None
+    # TW 5.7.0 returns ``count`` while current CN responses use
+    # ``remain_limit_count_bonus`` for the same list position.  Keeping both
+    # optional preserves either wire shape without an ambiguous Pydantic
+    # Union of permissive models.
+    count: int = None
+    remain_limit_count_bonus: int = None
+class RemainLimitCountBonusData(GachaBonusTargetUnitInfo):
+    pass
 class GachaParameter(BaseModel):
     id: int = None
     type: eGachaType = None
@@ -1391,7 +1403,7 @@ class UserChara(BaseModel):
     chara_love: int = None
     love_level: int = None
 class LoadDeckData(BaseModel):
-    deck_number: ePartyType = None
+    deck_number: Union[ePartyType, int] = None
     unit_id_1: int = None
     unit_id_2: int = None
     unit_id_3: int = None
@@ -3095,6 +3107,7 @@ class MirageNemesisProgress(BaseModel):
     nemesis_id: int = None
     area_level: int = None
     periodic_clear_count: int = None
+    is_unlock_quest: bool = None
     IsUnlockQuest: bool = None
 class MirageInfoFromHomeIndex(BaseModel):
     max_cleared_floor_num: int = None
@@ -3295,3 +3308,31 @@ class UnitRoleMasteryEnhanceInfo(BaseModel):
     after_slot_level: int = None
     after_enhance_level: int = None
     item_list: List[InventoryInfoPost] = None
+
+# TW response-only structures recovered from Assembly-CSharp.dll.
+class UserBattlepassLineReceivedLevel(BaseModel):
+    line_id: int = None
+    level: int = None
+class UserBattlepassLevelInfo(BaseModel):
+    level: int = None
+    highlight: int = None
+    type: int = None
+    id: int = None
+    count: int = None
+class UserBattlepassLineInfo(BaseModel):
+    line_id: int = None
+    level_list: List[UserBattlepassLevelInfo] = None
+class UserBattlepassInfo(BaseModel):
+    season_id: int = None
+    point: int = None
+    max_level: int = None
+    weekly_reset_time: int = None
+    line_received_level_list: List[UserBattlepassLineReceivedLevel] = None
+    mission_progress_list: List[UserMissionProgressInfo] = None
+class GiftMessageParameter(BaseModel):
+    id: int = None
+    discription: str = None
+    type_1: int = None
+    type_2: int = None
+    type_3: int = None
+    type_4: int = None

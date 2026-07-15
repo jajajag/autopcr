@@ -1,5 +1,5 @@
 #type: ignore
-from re import T
+# from re import T  # Python 3.13 no longer exposes this unused symbol.
 from typing import Generic, TypeVar, Optional
 from pydantic import BaseModel
 from pydantic.generics import GenericModel
@@ -26,6 +26,7 @@ class ResponseHeader(BaseModel):
     servertime: int = 0
     result_code: int = -1
     short_udid: str = None
+    required_res_ver: str = None
 
 class Response(GenericModel, Generic[TResponse]):
     data_headers: ResponseHeader = None

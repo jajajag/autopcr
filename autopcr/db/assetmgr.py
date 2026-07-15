@@ -11,6 +11,7 @@ from UnityPy.enums import ClassIDType
 from ..constants import CACHE_DIR
 from ..util import aiorequests
 from ..util.logger import instance as logger
+from .twasset import UNITYPY_LOCK
 
 UnityPy.config.FALLBACK_UNITY_VERSION = "2021.3.20f1"
 
@@ -20,6 +21,27 @@ AssetRegistry = Dict[str, AssetEntry]
 COMPACT_MANIFEST_FORMAT = 1
 MANIFEST_CATEGORY = "AssetBundles/Android"
 ROOT_MANIFEST = "manifest/manifest_assetmanifest"
+
+
+def _load_database(payload: bytes) -> bytes:
+    with UNITYPY_LOCK:
+        ab = UnityPy.load(payload)
+        asset = ab.objects[0].read()
+        script = getattr(asset, "m_Script", getattr(asset, "script", None))
+        if isinstance(script, str):
+            return script.encode("utf-8", "surrogateescape")
+        if script is not None:
+            return bytes(script)
+        raise ValueError("master TextAsset contains no script payload")
+
+
+def _load_texture(payload: bytes):
+    with UNITYPY_LOCK:
+        ab = UnityPy.load(payload)
+        for obj in ab.objects:
+            if obj.type == ClassIDType.Texture2D:
+                return obj.read().image
+    return None
 
 
 class assetmgr:
@@ -266,25 +288,19 @@ class assetmgr:
         return await (await aiorequests.get(download_url)).content
 
     async def db(self) -> bytes:
-        ab = UnityPy.load(await self.download('a/masterdata_master.unity3d'))
-        asset = ab.objects[0].read()
-        return asset.script
+        return _load_database(
+            await self.download('a/masterdata_master.unity3d')
+        )
 
     async def unit_icon(self, unit_id: int) -> bytes:
-        ab = UnityPy.load(await self.download(f'a/unit_icon_unit_{unit_id}.unity3d'))
-        for object in ab.objects:
-            if object.type == ClassIDType.Texture2D:
-                asset = object.read()
-                return asset.image
-        return None
+        return _load_texture(
+            await self.download(f'a/unit_icon_unit_{unit_id}.unity3d')
+        )
 
     async def ex_equip_icon(self, equip_id: int) -> bytes:
-        ab = UnityPy.load(await self.download(f'a/icon_icon_extra_equip_{equip_id}.unity3d'))
-        for object in ab.objects:
-            if object.type == ClassIDType.Texture2D:
-                asset = object.read()
-                return asset.image
-        return None
+        return _load_texture(
+            await self.download(f'a/icon_icon_extra_equip_{equip_id}.unity3d')
+        )
 
 
 # should lock before use

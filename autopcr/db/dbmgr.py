@@ -1,5 +1,5 @@
 import os, json, re
-from typing import Dict, Pattern, Tuple
+from typing import Dict, Iterable, Optional, Pattern, Tuple
 from ..constants import CACHE_DIR, DATA_DIR
 from .assetmgr import assetmgr
 from sqlalchemy import create_engine
@@ -13,8 +13,10 @@ TABLE_NAME_KEY = "--table_name"
 HASHED_NAME = re.compile(r"(?:v1_)?[0-9a-f]{64}")
 
 class dbmgr:
-    def __init__(self):
+    def __init__(self, region: str = 'cn'):
+        self.region = region
         self.ver = None
+        self.generation = 0
         self._dbpath = None
         self._engine = None
 
@@ -41,9 +43,24 @@ class dbmgr:
                 if os.path.exists(tmppath):
                     os.remove(tmppath)
             logger.info(f'db version {ver} updated')
+        self.dispose()
         self._engine = create_engine(f'sqlite:///{self._dbpath}')
         self.ver = ver
         self.unhash()
+        self.generation += 1
+
+    def load_db(self, path: str, ver: int):
+        """Load an already decoded database, including regional mirrors."""
+        self.dispose()
+        self._dbpath = path
+        self._engine = create_engine(f'sqlite:///{self._dbpath}')
+        self.ver = int(ver)
+        self.generation += 1
+
+    def dispose(self):
+        if self._engine is not None:
+            self._engine.dispose()
+            self._engine = None
 
     def session(self) -> Session:
         return Session(self._engine)
@@ -67,21 +84,48 @@ class dbmgr:
         pattern = "|".join(sorted((re.escape(hashed) for hashed in mapping), key=len, reverse=True))
         return mapping, re.compile(pattern)
 
-    def unhash(self):
-        rainbow_json = os.path.join(DATA_DIR, 'rainbow.json')
+    def unhash(
+        self,
+        rainbow_json: Optional[str] = None,
+        *,
+        strict: bool = False,
+        required_tables: Iterable[str] = (),
+    ) -> int:
+        rainbow_json = rainbow_json or os.path.join(DATA_DIR, 'rainbow.json')
         if not os.path.exists(rainbow_json):
-            logger.error("Rainbow table not found, unhashing skipped.")
-            return
+            message = f"Rainbow table not found: {rainbow_json}"
+            if strict:
+                raise FileNotFoundError(message)
+            logger.error("%s; unhashing skipped.", message)
+            return 0
 
-        with open(rainbow_json, 'r') as f:
-            mapping, pattern = self._build_replacer(json.load(f))
+        with open(rainbow_json, 'r', encoding='utf-8') as f:
+            rainbow = json.load(f)
+        if strict:
+            for hashed_table, columns in rainbow.items():
+                if not isinstance(columns, dict):
+                    raise ValueError(f'Invalid rainbow entry: {hashed_table!r}')
+                identifiers = [
+                    hashed_table,
+                    *(name for name in columns if name != TABLE_NAME_KEY),
+                    *columns.values(),
+                ]
+                if any(
+                    not isinstance(name, str)
+                    or not re.fullmatch(r'[A-Za-z0-9_]+', name)
+                    for name in identifiers
+                ):
+                    raise ValueError(
+                        f'Invalid identifier in rainbow entry {hashed_table!r}'
+                    )
+        mapping, pattern = self._build_replacer(rainbow)
 
         def restore(text):
             if not text:
                 return text
             return pattern.sub(lambda m: mapping.get(m.group(0), m.group(0)), text)
 
-        logger.info("Start Unhashing DB.")
+        logger.info("Start Unhashing DB with %s.", rainbow_json)
         with self._engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             schema_version = conn.exec_driver_sql("PRAGMA schema_version").scalar()
             rows = conn.exec_driver_sql(
@@ -93,22 +137,40 @@ class dbmgr:
             updates = []
             renamed_tables = 0
             unresolved_tables = 0
+            restored_table_names = set()
             for rowid, type_, name, tbl_name, sql in rows:
                 restored = (restore(name), restore(tbl_name), restore(sql))
-                if type_ == 'table' and HASHED_NAME.fullmatch(restored[0]):
-                    unresolved_tables += 1
+                if type_ == 'table':
+                    restored_table_names.add(restored[0])
+                    if HASHED_NAME.fullmatch(restored[0]):
+                        unresolved_tables += 1
                 if restored == (name, tbl_name, sql):
                     continue
                 updates.append((*restored, rowid))
                 if type_ == 'table' and restored[0] != name:
                     renamed_tables += 1
 
+            minimum_coverage = max(1, len(rainbow) * 4 // 5)
+            missing_required = [
+                table for table in required_tables
+                if table not in restored_table_names
+            ]
+            if strict and renamed_tables < minimum_coverage:
+                raise ValueError(
+                    "Rainbow table coverage is too low: "
+                    f"decoded {renamed_tables}/{len(rainbow)} tables"
+                )
+            if missing_required:
+                raise ValueError(
+                    "Decoded database is missing required tables: "
+                    + ", ".join(missing_required)
+                )
             if unresolved_tables:
                 logger.warning(f"{unresolved_tables} tables missing from rainbow table, left hashed.")
 
             if not updates:
                 logger.info("DB is already unhashed, nothing to do.")
-                return
+                return 0
 
             try:
                 conn.exec_driver_sql("PRAGMA writable_schema=ON")
@@ -133,6 +195,16 @@ class dbmgr:
         # 连接池里可能还留着 schema 已过期的连接
         self._engine.dispose()
         logger.info(f"Unhashing complete, {renamed_tables} tables restored.")
+        return renamed_tables
 
 
-instance = dbmgr()
+_instances = {'cn': dbmgr('cn')}
+
+
+def get_dbmgr(region: str = 'cn') -> dbmgr:
+    if region not in _instances:
+        _instances[region] = dbmgr(region)
+    return _instances[region]
+
+
+instance = get_dbmgr('cn')
