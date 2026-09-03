@@ -24,21 +24,6 @@ import time, datetime
 import json
 from ..util.logger import instance as logger
 
-_api_call_lock = Lock()
-_last_api_call_at = 0.0
-
-
-async def _wait_for_api_interval():
-    """Keep the configured minimum gap between process-wide API calls."""
-    global _last_api_call_at
-    if API_CALL_INTERVAL <= 0:
-        return
-    async with _api_call_lock:
-        wait = API_CALL_INTERVAL - (time.monotonic() - _last_api_call_at)
-        if wait > 0:
-            await sleep(wait)
-        _last_api_call_at = time.monotonic()
-
 class ApiException(Exception):
 
     def __init__(self, message, status, result_code):
@@ -73,6 +58,7 @@ class apiclient(Container["apiclient"]):
         if sdk.initial_uid is not None:
             self.viewer_id = int(sdk.initial_uid)
         self._lck = Lock()
+        self._last_api_call_completed_at = 0.0
 
     @staticproperty
     def time() -> int:
@@ -220,7 +206,6 @@ class apiclient(Container["apiclient"]):
                 # receive reusable game-session traffic).  Users who require a
                 # system proxy can opt in explicitly.
                 transport_options['proxies'] = {'http': '', 'https': ''}
-            await _wait_for_api_interval()
             resp = await aiorequests.post(
                 url,
                 data=request_data,
@@ -345,4 +330,12 @@ class apiclient(Container["apiclient"]):
 
     async def request(self, request: Request[TResponse]) -> TResponse:
         async with self._lck:
-            return await self._request_internal(request)
+            wait = API_CALL_INTERVAL - (
+                time.monotonic() - self._last_api_call_completed_at
+            )
+            if wait > 0:
+                await sleep(wait)
+            try:
+                return await self._request_internal(request)
+            finally:
+                self._last_api_call_completed_at = time.monotonic()
