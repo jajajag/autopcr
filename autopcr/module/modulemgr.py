@@ -173,6 +173,9 @@ class ModuleManager:
 
             self.config.update(config)
 
+            global_config = self.modules_list.get_module_from_key('global_config')
+            retry_times = global_config.get_config('stamina_consume_retry_times') if global_config.get_config('global_config') else 0
+
             resp: TaskResult = TaskResult(
                     order = [],
                     result = {}
@@ -180,7 +183,15 @@ class ModuleManager:
 
             for module in modules:
                 resp.order.append(module.key)
-                resp.result[module.key] = await module.do_from(client)
+                retry_logs = []
+                attempts = retry_times + 1 if "体力消耗" in module.tags else 1
+                for attempt in range(attempts):
+                    result = await module.do_from(client)
+                    if result.status not in (eResultStatus.ERROR, eResultStatus.ABORT) or attempt == attempts - 1:
+                        break
+                    retry_logs.append(f"第{attempt + 1}次执行{result.status.value}：{result.log}\n开始第{attempt + 1}次重试")
+                result.log = '\n'.join(retry_logs + [result.log])
+                resp.result[module.key] = result
                 if resp.result[module.key].status == eResultStatus.PANIC:
                     break
 

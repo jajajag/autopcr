@@ -19,6 +19,7 @@ from ...util.format_number import format_number
 @description('仅开启时生效，氪体数将取满足条件的最大值，禅模式指不执行体力相关的功能，仅在清日常生效，单项执行将忽略。庆典包括其倍数，加速期间的所有倍数判断均x2')
 @name("全局配置")
 @default(True)
+@inttype('stamina_consume_retry_times', "体力消耗任务失败重试次数", 0, [0, 1, 2, 3])
 @inttype('sweep_recover_stamina_times', "平时氪体数", 0, [i for i in range(41)])
 @inttype('sweep_recover_stamina_times_n2', "n2氪体数", 0, [i for i in range(41)])
 @inttype('sweep_recover_stamina_times_n3', "n3氪体数", 0, [i for i in range(41)])
