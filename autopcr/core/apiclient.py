@@ -18,6 +18,7 @@ from ..constants import (
     API_CALL_INTERVAL,
     DEBUG_LOG,
     MAX_API_RUNNING,
+    STAMINA_API_CALL_INTERVAL,
     refresh_headers,
 )
 import time, datetime
@@ -33,6 +34,24 @@ class ApiException(Exception):
 
 class NetworkException(Exception):
     pass
+
+STAMINA_CONSUMING_API_PATHS = frozenset({
+    "abyss/quest_skip_multiple",
+    "abyss/quest_start",
+    "crown/quest_skip_multiple",
+    "crown/quest_start",
+    "event/hatsune/quest_skip",
+    "event/hatsune/quest_skip_multiple",
+    "event/hatsune/quest_start",
+    "event/shiori/quest_skip",
+    "event/shiori/quest_start",
+    "mirage/nemesis_skip_multiple",
+    "quest/quest_skip",
+    "quest/quest_skip_multiple",
+    "quest/start",
+    "seven/quest_skip_multiple",
+    "seven/quest_start",
+})
 
 TResponse = TypeVar('TResponse', bound=ResponseBase, covariant=True)
 
@@ -330,7 +349,12 @@ class apiclient(Container["apiclient"]):
 
     async def request(self, request: Request[TResponse]) -> TResponse:
         async with self._lck:
-            wait = API_CALL_INTERVAL - (
+            interval = (
+                STAMINA_API_CALL_INTERVAL
+                if request.url in STAMINA_CONSUMING_API_PATHS
+                else API_CALL_INTERVAL
+            )
+            wait = interval - (
                 time.monotonic() - self._last_api_call_completed_at
             )
             if wait > 0:
