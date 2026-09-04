@@ -351,7 +351,8 @@ class apiclient(Container["apiclient"]):
         async with self._lck:
             interval = (
                 STAMINA_API_CALL_INTERVAL
-                if request.url in STAMINA_CONSUMING_API_PATHS
+                if request is not None
+                and request.url in STAMINA_CONSUMING_API_PATHS
                 else API_CALL_INTERVAL
             )
             wait = interval - (
