@@ -17,7 +17,7 @@ SESSION_ERROR_MAX_RETRY = 2
 MAX_API_RUNNING = 8
 API_CALL_INTERVAL = max(
     0.0,
-    float(os.getenv("AUTOPCR_API_CALL_INTERVAL", "0.2")),
+    float(os.getenv("AUTOPCR_API_CALL_INTERVAL", "0.3")),
 )
 
 BSDK = '官服'
