@@ -17,11 +17,11 @@ SESSION_ERROR_MAX_RETRY = 2
 MAX_API_RUNNING = 8
 API_CALL_INTERVAL = max(
     0.0,
-    float(os.getenv("AUTOPCR_API_CALL_INTERVAL", "0.3")),
+    float(os.getenv("AUTOPCR_API_CALL_INTERVAL", "0.5")),
 )
 STAMINA_API_CALL_INTERVAL = max(
     API_CALL_INTERVAL,
-    float(os.getenv("AUTOPCR_STAMINA_API_CALL_INTERVAL", "1.0")),
+    float(os.getenv("AUTOPCR_STAMINA_API_CALL_INTERVAL", "0.8")),
 )
 
 BSDK = '官服'
