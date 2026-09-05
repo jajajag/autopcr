@@ -149,6 +149,8 @@ class ex_equip_rainbow_enchance(Module):
                 _, pending_target_step = self.get_alces_auto_target(
                     client, serial_id, target_sub_status, no_max_num
                 )
+                if client._sdk.is_tw:
+                    pending_target_step = 5
                 await self.decide_alces(
                     client,
                     top.pending_alces_data,
@@ -184,7 +186,7 @@ class ex_equip_rainbow_enchance(Module):
                     break
 
                 per_exec_consume = Counter()
-                exec_count = ALCES_AUTO_EXEC_COUNT
+                exec_count = 1 if client._sdk.is_tw else ALCES_AUTO_EXEC_COUNT
                 for consume, item in db.alces_cost.items():
                     cost = item.count
                     cur = client.data.get_inventory(consume)
@@ -204,6 +206,21 @@ class ex_equip_rainbow_enchance(Module):
                 
                 if stop:
                     break
+
+                if client._sdk.is_tw:
+                    # TW uses the single-roll flow from tw_server.  Settle
+                    # each pending result before requesting another roll.
+                    resp = await client.alces_exec(serial_id)
+                    pending_alces_data = resp.pending_alces_data
+                    if pending_alces_data is None:
+                        raise AbortError("单次究极炼成未返回待确认属性")
+                    accept = await self.decide_alces(
+                        client, pending_alces_data, target_sub_status
+                    )
+                    alces_exec_cnt += 1
+                    consume_cnt += per_exec_consume
+                    self._log(f"{'A 接受' if accept else 'R 放弃'}炼成属性: {db.get_ex_equip_sub_status_str(client.data.ex_equips[serial_id].ex_equipment_id, pending_alces_data.sub_status or [])}")
+                    continue
 
                 auto_target_status, auto_target_step = self.get_alces_auto_target(
                     client, serial_id, target_sub_status, no_max_num

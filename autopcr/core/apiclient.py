@@ -234,11 +234,7 @@ class apiclient(Container["apiclient"]):
             )
 
             if resp.status_code != 200:
-                message = (
-                    f'/{request.url} returned HTTP {resp.status_code}'
-                )
-                logger.error(message)
-                raise NetworkException(message)
+                raise NetworkException
 
             response0 = await resp.content
             apiclient._local_time = time.time()
@@ -247,9 +243,6 @@ class apiclient(Container["apiclient"]):
                 apiclient._unpack(response0, self._request_iv)[0]
                 if self._sdk.is_tw or request.crypted else loads(response0)
             )
-        except NetworkException:
-            self.active_server = (self.active_server + 1) % len(self.servers)
-            raise
         except Exception as ex:
             self.active_server = (self.active_server + 1) % len(self.servers)
             raise NetworkException from ex
