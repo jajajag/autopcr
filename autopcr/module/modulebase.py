@@ -199,10 +199,16 @@ class Module:
             return True, ""
 
     async def do_from(self, client: pcrclient) -> ModuleResult:
+        # Resolve the catalog at execution time to avoid its import cycle.
+        # Membership also covers daily modules executed individually.
+        from .modules import daily_modules
+        from ..core.apiclient import daily_api_calls
+
         result: ModuleResult = ModuleResult(
                 name=self.name,
                 config = '\n'.join([f"{self.config[key].desc}: {self.get_config_display(key)}" for key in self.config]),
             )
+        interval_token = daily_api_calls.set(type(self) in daily_modules.modules)
         try:
             self.log.clear()
             self.warn.clear()
@@ -240,6 +246,7 @@ class Module:
             result.log = str(e)
             result.status = eResultStatus.ERROR
         finally:
+            daily_api_calls.reset(interval_token)
             result.log = ('\n'.join(self.log) + "\n" + result.log).strip() or "ok"
             result.table = self.table
 

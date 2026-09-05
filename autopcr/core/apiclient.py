@@ -5,6 +5,7 @@ from ..model.error import PanicError
 from .base import Container
 from ..model.modelbase import *
 from asyncio import Lock, sleep
+from contextvars import ContextVar
 from typing import Tuple, TypeVar
 from msgpack import packb, unpackb
 from ..util import aiorequests, freqlimiter
@@ -18,7 +19,7 @@ from ..constants import (
     API_CALL_INTERVAL,
     DEBUG_LOG,
     MAX_API_RUNNING,
-    STAMINA_API_CALL_INTERVAL,
+    DAILY_API_CALL_INTERVAL,
     refresh_headers,
 )
 import time, datetime
@@ -35,23 +36,9 @@ class ApiException(Exception):
 class NetworkException(Exception):
     pass
 
-STAMINA_CONSUMING_API_PATHS = frozenset({
-    "abyss/quest_skip_multiple",
-    "abyss/quest_start",
-    "crown/quest_skip_multiple",
-    "crown/quest_start",
-    "event/hatsune/quest_skip",
-    "event/hatsune/quest_skip_multiple",
-    "event/hatsune/quest_start",
-    "event/shiori/quest_skip",
-    "event/shiori/quest_start",
-    "mirage/nemesis_skip_multiple",
-    "quest/quest_skip",
-    "quest/quest_skip_multiple",
-    "quest/start",
-    "seven/quest_skip_multiple",
-    "seven/quest_start",
-})
+# Task-local classification avoids leaking the daily interval across accounts
+# or pooled clients. Module execution restores the previous context on exit.
+daily_api_calls = ContextVar('daily_api_calls', default=False)
 
 TResponse = TypeVar('TResponse', bound=ResponseBase, covariant=True)
 
@@ -350,9 +337,8 @@ class apiclient(Container["apiclient"]):
     async def request(self, request: Request[TResponse]) -> TResponse:
         async with self._lck:
             interval = (
-                STAMINA_API_CALL_INTERVAL
-                if request is not None
-                and request.url in STAMINA_CONSUMING_API_PATHS
+                DAILY_API_CALL_INTERVAL
+                if daily_api_calls.get()
                 else API_CALL_INTERVAL
             )
             wait = interval - (

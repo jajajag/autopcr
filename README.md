@@ -120,7 +120,7 @@ docker compose down
 | AUTOPCR_USE_HTTPS | 公网访问链接是否使用 HTTPS | False |
 | AUTOPCR_TW_APP_VERSION | 台服默认客户端版本；台服更新后可覆盖 | 5.8.1 |
 | AUTOPCR_API_CALL_INTERVAL | 同一账号收到 API 响应后到下一次调用的最小间隔（秒）；设为 0 可关闭 | 0.5 |
-| AUTOPCR_STAMINA_API_CALL_INTERVAL | 同一账号发起消耗体力 API 前的最小间隔（秒），不会低于普通 API 间隔 | 0.8 |
+| AUTOPCR_DAILY_API_CALL_INTERVAL | 日常分类任务内，同一账号上一 API 结束到下一 API 开始的最小间隔（秒）；单项执行也生效，不低于普通 API 间隔 | 0.8 |
 | AUTOPCR_TW_RES_VERSION | 台服 HTTP 资源版本兜底值；与 master database 版本相互独立，响应后按服务端要求刷新 | 00500030 |
 | AUTOPCR_TW_UNITY_VERSION | 台服 Unity 请求头版本 | 6000.0.58f2 |
 | AUTOPCR_TW_CURL_VERSION | 台服 User-Agent 中的 libcurl 版本 | 8.10.1-DEV |
