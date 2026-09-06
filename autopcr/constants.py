@@ -21,7 +21,7 @@ API_CALL_INTERVAL = max(
 )
 DAILY_API_CALL_INTERVAL = max(
     API_CALL_INTERVAL,
-    float(os.getenv("AUTOPCR_DAILY_API_CALL_INTERVAL", "0.8")),
+    float(os.getenv("AUTOPCR_DAILY_API_CALL_INTERVAL", "1.0")),
 )
 
 BSDK = '官服'
