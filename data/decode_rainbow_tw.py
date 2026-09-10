@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """把同目录 libil2cpp.so / global-metadata.dat 转为 rainbow_tw.json。
 运行：python3 decode_rainbow_tw.py（Python 3.10+，仅标准库）。
-输出采用客户端命名；不依赖旧映射或数据库。当前支持 IL2CPP v31 / ARM64。
+输出通过内置兼容规则恢复标准名称；不依赖旧映射或数据库。当前支持 IL2CPP v31 / ARM64。
+旧参考未覆盖的新名称保留客户端 snake_case；不能据此保证任意新增字段符合 ORM。
 地址、哈希和表数动态读取；格式或代码布局不支持时停止，保留旧 JSON。
 """
 
@@ -449,7 +450,7 @@ class NativeClient:
 
 
 
-def analyze(client):
+def analyze(client, *, evidence=None):
     """Build client-named mappings using only the two client files."""
     metadata = client.metadata
     projections = metadata.queries()
@@ -489,6 +490,14 @@ def analyze(client):
         if table in output:
             raise ValueError(f'Duplicate table constant: {table}')
         output[table] = entry
+        if evidence is not None:
+            evidence[table] = {
+                'class': class_name,
+                'columns': {columns[p['query_column']]: p['parameter']
+                            for p in parameters if p['query_column'] is not None},
+                'reader_address': result['reader_address'],
+                'constructor_address': result['constructor_address'],
+            }
         null_flags += sum(p['query_column'] is None for p in parameters)
     real_names = [v['--table_name'] for v in output.values()]
     if len(set(real_names)) != len(real_names):
@@ -499,6 +508,72 @@ def analyze(client):
     if not output:
         raise ValueError("没有提取到表；请检查两个文件是否来自同一受支持版本")
     return output
+
+
+# BEGIN VERIFIED ALIASES
+# Derived by exact old hash joins; see tools/build_tw_aliases.py.
+TABLE_ALIASES = {'MasterAsm4ChoiceData': 'asm_4_choice_data', 'MasterClanBattle2BossData': 'clan_battle_2_boss_data', 'MasterClanBattle2MapData': 'clan_battle_2_map_data', 'MasterGoldsetData2': 'goldset_data_2', 'MasterRarity6QuestData': 'rarity_6_quest_data', 'MasterUnlockRarity6': 'unlock_rarity_6'}
+COLUMN_ALIASES = {
+    'MasterAlbumVoiceList': {'CueName': 'voice_id', 'CueSheetName': 'sheet_id'},
+    'MasterBirthdayLoginBonusData': {'storyId': 'adv_id'},
+    'MasterDungeonArea': {'ContentReleaseStoryId': 'content_release_story', 'InitialClearStoryId': 'initial_clear_story'},
+    'MasterDungeonAreaData': {'ContentReleaseStoryId': 'content_release_story', 'InitialClearStoryId': 'initial_clear_story'},
+    'MasterEReduction': {'Threshold1': 'threshold_1', 'Threshold2': 'threshold_2', 'Threshold3': 'threshold_3', 'Threshold4': 'threshold_4', 'Threshold5': 'threshold_5', 'Value1': 'value_1', 'Value2': 'value_2', 'Value3': 'value_3', 'Value4': 'value_4', 'Value5': 'value_5'},
+    'MasterEquipmentCraft': {'Id': 'equipment_id'},
+    'MasterEquipmentData': {'Attack': 'atk', 'CraftFlag': 'craft_flg', 'Critical': 'physical_critical', 'Defense': 'def', 'EnhancementPoint': 'equipment_enhance_point', 'Id': 'equipment_id', 'MagicAttack': 'magic_str', 'MagicDefense': 'magic_def', 'MagicPenetration': 'magic_penetrate', 'Name': 'equipment_name', 'Penetration': 'physical_penetrate', 'SellPrice': 'sale_price'},
+    'MasterEquipmentEnhanceData': {'EnhanceLevel': 'equipment_enhance_level'},
+    'MasterEquipmentEnhanceRate': {'Attack': 'atk', 'Critical': 'physical_critical', 'Defense': 'def', 'Id': 'equipment_id', 'MagicAttack': 'magic_str', 'MagicDefense': 'magic_def', 'MagicPenetration': 'magic_penetrate', 'Penetration': 'physical_penetrate'},
+    'MasterEventNaviComment': {'commentType': 'comment_id', 'unitId': 'character_id', 'unitName': 'character_name'},
+    'MasterEventNaviCommentCondition': {'commentType': 'comment_id'},
+    'MasterExEquipmentData': {'DefaultCritical': 'default_physical_critical', 'DefaultPenetrate': 'default_physical_penetrate', 'MaxCritical': 'max_physical_critical', 'MaxPenetrate': 'max_physical_penetrate', 'Skill1': 'passive_skill_id_1', 'Skill2': 'passive_skill_id_2', 'SkillPower': 'passive_skill_power'},
+    'MasterExEquipmentEnhanceData': {'NeededGold': 'needed_mana'},
+    'MasterGoldsetData': {'UserJewelCount': 'use_jewel_count'},
+    'MasterGoldsetData2': {'UserJewelCount': 'use_jewel_count'},
+    'MasterGrowthParameter': {'Equipment1': 'equipment_1', 'Equipment2': 'equipment_2', 'Equipment3': 'equipment_3', 'Equipment4': 'equipment_4', 'Equipment5': 'equipment_5', 'Equipment6': 'equipment_6', 'Rarity': 'unit_rarity'},
+    'MasterItemData': {'Id': 'item_id', 'Name': 'item_name', 'Type': 'item_type'},
+    'MasterLegionEffect': {'ExSkillBonus': 'bonus_5', 'LevelBonus': 'bonus_1', 'SkillBonus1': 'bonus_3', 'SkillBonus2': 'bonus_4', 'UbBonus': 'bonus_2'},
+    'MasterLoginBonusAdv': {'storyId': 'adv_id', 'targetDay': 'count_key'},
+    'MasterNaviComment': {'commentType': 'comment_id', 'unitId': 'character_id', 'unitName': 'character_name'},
+    'MasterPromotionBonus': {'Attack': 'atk', 'Critical': 'physical_critical', 'Defense': 'def', 'MagicAttack': 'magic_str', 'MagicDefense': 'magic_def', 'MagicPenetration': 'magic_penetrate', 'Penetration': 'physical_penetrate'},
+    'MasterRewardCollectGuide': {'Id': 'object_id'},
+    'MasterRoomCharacterPersonality': {'characterPersonality': 'personality_id'},
+    'MasterRoomChatFormation': {'unit1Dir': 'unit_1_dir', 'unit1X': 'unit_1_x', 'unit1Y': 'unit_1_y', 'unit2Dir': 'unit_2_dir', 'unit2X': 'unit_2_x', 'unit2Y': 'unit_2_y', 'unit3Dir': 'unit_3_dir', 'unit3X': 'unit_3_x', 'unit3Y': 'unit_3_y', 'unit4Dir': 'unit_4_dir', 'unit4X': 'unit_4_x', 'unit4Y': 'unit_4_y', 'unit5Dir': 'unit_5_dir', 'unit5X': 'unit_5_x', 'unit5Y': 'unit_5_y'},
+    'MasterRoomItem': {'effectID1': 'effect_id_1'},
+    'MasterRoomItemAnnouncement': {'endTime': 'announcement_end', 'startTime': 'announcement_start'},
+    'MasterRoomItemDetail': {'levelUpId': 'lvup_trigger_id', 'levelUpId2': 'lvup_trigger_id_2', 'levelUpItemNum1': 'lvup_item1_num', 'levelUpItemType1': 'lvup_item1_type', 'levelUpTime': 'lvup_time', 'levelUpType': 'lvup_trigger_type', 'levelUpType2': 'lvup_trigger_type_2', 'levelUpValue': 'lvup_trigger_value', 'levelUpValue2': 'lvup_trigger_value_2'},
+    'MasterSdNaviComment': {'commentType': 'comment_id', 'unitId': 'character_id'},
+    'MasterSpDetailVoice': {'CueName01': 'cue_name_1', 'CueName02': 'cue_name_2', 'CueName03': 'cue_name_3', 'CueName04': 'cue_name_4', 'CueName05': 'cue_name_5'},
+    'MasterSreEffect': {'ExSkillBonus': 'bonus_5', 'LevelBonus': 'bonus_1', 'SkillBonus1': 'bonus_3', 'SkillBonus2': 'bonus_4', 'UbBonus': 'bonus_2'},
+    'MasterUniqueEquipEnhanceRate': {'Attack': 'atk', 'Critical': 'physical_critical', 'Defense': 'def', 'MagicAttack': 'magic_str', 'MagicDefense': 'magic_def', 'MagicPenetration': 'magic_penetrate', 'Penetration': 'physical_penetrate'},
+    'MasterUniqueEquipmentCraft': {'Id': 'equip_id'},
+    'MasterUniqueEquipmentData': {'Attack': 'atk', 'CraftFlag': 'craft_flg', 'Critical': 'physical_critical', 'Defense': 'def', 'EnhancementPoint': 'equipment_enhance_point', 'Id': 'equipment_id', 'MagicAttack': 'magic_str', 'MagicDefense': 'magic_def', 'MagicPenetration': 'magic_penetrate', 'Name': 'equipment_name', 'Penetration': 'physical_penetrate', 'SellPrice': 'sale_price'},
+    'MasterUniqueEquipmentEnhanceData': {'NeededGold': 'needed_mana'},
+    'MasterUniqueEquipmentEnhanceRate': {'Attack': 'atk', 'Critical': 'physical_critical', 'Defense': 'def', 'Id': 'equipment_id', 'MagicAttack': 'magic_str', 'MagicDefense': 'magic_def', 'MagicPenetration': 'magic_penetrate', 'Penetration': 'physical_penetrate'},
+    'MasterUniqueEquipmentRankup': {'Id': 'equip_id'},
+    'MasterUnitData': {'AtkCastTime': 'normal_atk_cast_time', 'CutIn1': 'cutin_1', 'CutIn2': 'cutin_2'},
+    'MasterUnitPromotionStatus': {'Attack': 'atk', 'Critical': 'physical_critical', 'Defense': 'def', 'MagicAttack': 'magic_str', 'MagicDefense': 'magic_def', 'MagicPenetration': 'magic_penetrate', 'Penetration': 'physical_penetrate'},
+    'MasterUnlockRarity6': {'Attack': 'atk', 'Critical': 'physical_critical', 'Defense': 'def', 'MagicAttack': 'magic_str', 'MagicDefense': 'magic_def', 'MagicPenetration': 'magic_penetrate', 'Penetration': 'physical_penetrate'},
+}
+# END VERIFIED ALIASES
+
+
+def standard_names(mapping, evidence):
+    """Use exact client class/parameter keys; never apply aliases globally."""
+    result = {}
+    for table, entry in mapping.items():
+        source = evidence[table]
+        class_name = source['class']
+        aliases = COLUMN_ALIASES.get(class_name, {})
+        restored = {h: aliases.get(source['columns'][h], name)
+                    for h, name in entry.items() if h != '--table_name'}
+        if len(set(restored.values())) != len(restored):
+            raise ValueError(f'{class_name} 的标准字段名称冲突')
+        restored['--table_name'] = TABLE_ALIASES.get(class_name, entry['--table_name'])
+        result[table] = restored
+    names = [v['--table_name'] for v in result.values()]
+    if len(set(names)) != len(names):
+        raise ValueError('标准表名冲突')
+    return result
 
 
 def write_mapping(path, mapping):
@@ -524,14 +599,15 @@ def main():
     try:
         metadata = Metadata(directory / 'global-metadata.dat')
         elf = Elf(directory / 'libil2cpp.so')
-        mapping = analyze(NativeClient(elf, metadata))
+        evidence = {}
+        mapping = standard_names(analyze(NativeClient(elf, metadata), evidence=evidence), evidence)
         path = directory / 'rainbow_tw.json'
         write_mapping(path, mapping)
     except (OSError, ValueError, KeyError, IndexError, StopIteration, struct.error) as exc:
         print(f'解码失败，旧 rainbow_tw.json 保持不变：{exc}', file=sys.stderr)
         return 1
     print(f'已生成 {path}：{len(mapping)} 张表，'
-          f'{sum(len(v) - 1 for v in mapping.values())} 个字段（客户端命名）')
+          f'{sum(len(v) - 1 for v in mapping.values())} 个字段（已应用标准名称兼容规则）')
     return 0
 
 
