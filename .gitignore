@@ -28,4 +28,8 @@ autopcr/http_server/client_version
 *.autopcrcfg
 /tw570.json
 
+# Local client inputs for data/decode_rainbow_tw.py (large binary files).
+/data/libil2cpp.so
+/data/global-metadata.dat
+
 .vscode/
