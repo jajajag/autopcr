@@ -111,7 +111,7 @@ TW_HEADERS = {
     'Content-Type': 'application/octet-stream',
     'Expect': '100-continue',
     'X-Unity-Version': TW_UNITY_VERSION,
-    'APP-VER': os.getenv('AUTOPCR_TW_APP_VERSION', '5.8.1'),
+    'APP-VER': os.getenv('AUTOPCR_TW_APP_VERSION', '5.9.0'),
     'BATTLE-LOGIC-VERSION': '4',
     'BUNDLE-VER': '',
     'DEVICE': '2',
