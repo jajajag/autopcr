@@ -10,6 +10,8 @@ from ..core.datamgr import datamgr
 from ..db.database import db
 from .enums import eEventSubStoryStatus
 from typing import Optional
+from ..core.region import get_region
+from ..util.dungeon import get_enter_area_id, get_rest_challenge_count
 
 def handles(cls):
     cls.__base__.update = cls.update
@@ -566,11 +568,15 @@ class HomeIndexResponse(responses.HomeIndexResponse):
         if self.user_clan and self.user_clan.donation_num:
             mgr.donation_num = self.user_clan.donation_num
         if self.dungeon_info:
-            mgr.dungeon_area_id = self.dungeon_info.enter_area_id
-            if self.dungeon_info.rest_challenge_count:
-                for count in self.dungeon_info.rest_challenge_count:
-                    mgr.dungeon_avaliable = count.count > 0
-                    break
+            if get_region() == 'tw':
+                mgr.dungeon_area_id = get_enter_area_id(self.dungeon_info, 1, True)
+                mgr.dungeon_avaliable = get_rest_challenge_count(self.dungeon_info, 1, True) > 0
+            else:
+                mgr.dungeon_area_id = self.dungeon_info.enter_area_id
+                if self.dungeon_info.rest_challenge_count:
+                    for count in self.dungeon_info.rest_challenge_count:
+                        mgr.dungeon_avaliable = count.count > 0
+                        break
         if self.training_quest_count:
             mgr.training_quest_count = self.training_quest_count
         if self.training_quest_max_count:

@@ -10,6 +10,7 @@ from ...db.database import db
 from ...model.enums import *
 from ...model.custom import ItemType
 from ...util.linq import flow
+from ...util.dungeon import get_enter_area_id, get_rest_challenge_count
 
 class explore_sweep(Module):
     @abstractmethod
@@ -67,6 +68,8 @@ class explore_mana(explore_sweep):
 class underground_skip(Module):
     async def do_task(self, client: pcrclient):
         infos = await client.get_dungeon_info()
+        is_tw = client._sdk.is_tw
+        enter_area_id = get_enter_area_id(infos, 1, is_tw)
         if not infos.dungeon_cleared_area_id_list:
             infos.dungeon_cleared_area_id_list = []
         not_max_stop = self.get_config("underground_not_max_stop")
@@ -107,28 +110,28 @@ class underground_skip(Module):
                            or db.xingqiubei == (reward.type, reward.id)]
                 result = await client.serialize_reward_summary(rewards)
                 self._log(f"扫荡了【{dungeon_name(id)}】,获得了:\n{result}")
-                return reward_list.rest_challenge_count[0].count
+                return get_rest_challenge_count(reward_list, 1, is_tw)
             else:
                 raise AbortError("不存在已完成讨伐的地下城")
 
         double_mana = client.data.is_dungeon_mana_campaign()
-        rest = infos.rest_challenge_count[0].count
-        if infos.enter_area_id != 0:
-            if db.is_secret_dungeon_id(infos.enter_area_id):
+        rest = get_rest_challenge_count(infos, 1, is_tw)
+        if enter_area_id != 0:
+            if db.is_secret_dungeon_id(enter_area_id):
                 raise SkipError("当前位于里地下城")
 
-            self._log(f"当前位于【{dungeon_name(infos.enter_area_id)}】")
+            self._log(f"当前位于【{dungeon_name(enter_area_id)}】")
             if double_mana:
                 self._log(f"今日地下城双倍mana")
-                rest = await do_sweep(infos.enter_area_id)
+                rest = await do_sweep(enter_area_id)
             else:
                 self._log(f"今日地下城非双倍mana")
                 if rest:
                     self._log(f"还有{rest}次挑战次数，进行扫荡")
-                    rest = await do_sweep(infos.enter_area_id)
+                    rest = await do_sweep(enter_area_id)
                 else:
                     if always_sweep:
-                        rest = await do_sweep(infos.enter_area_id)
+                        rest = await do_sweep(enter_area_id)
 
         if secret_dungeon_stop and db.is_secret_dungeon_time():
             raise SkipError("今日里地下城活动，不扫荡普通地下城")
@@ -153,6 +156,8 @@ class special_underground_skip(Module):
             raise SkipError("当前无特别地下城")
 
         infos = await client.get_dungeon_info()
+        is_tw = client._sdk.is_tw
+        enter_area_id = get_enter_area_id(infos, 2, is_tw)
 
         special_dungeon_area = db.get_open_secret_dungeon_area()
         _special_info = None
@@ -189,18 +194,18 @@ class special_underground_skip(Module):
             result = await client.serialize_reward_summary(rewards)
             self._log(f"进入了【{dungeon_name(id)}】,获得了:\n{result}")
 
-        rest = infos.rest_challenge_count[0].count
+        rest = get_rest_challenge_count(infos, 2, is_tw)
 
-        if infos.enter_area_id != 0:
-            if not db.is_secret_dungeon_id(infos.enter_area_id):
+        if enter_area_id != 0:
+            if not db.is_secret_dungeon_id(enter_area_id):
                 raise AbortError("当前位于普通地下城，不支持扫荡")
 
-            self._log(f"当前位于【{dungeon_name(infos.enter_area_id)}】")
+            self._log(f"当前位于【{dungeon_name(enter_area_id)}】")
             if rest:
                 if secret_dungeon_retreat:
                     if (await special_dungeon_info()).clear_num == 0:
                         raise AbortError("特别地下城未通关，将不撤退")
-                    await do_retreat(infos.enter_area_id)
+                    await do_retreat(enter_area_id)
                 else:
                     raise AbortError("今天仍有挑战次数，但设置不撤退")
 

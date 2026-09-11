@@ -517,6 +517,7 @@ class DungeonEnterAreaResponse(ResponseBase):
     pattern: int = None
 class DungeonInfoResponse(ResponseBase):
     enter_area_id: int = None
+    enter_area_info_list: List[DungeonEnterAreaInfo] = None
     rest_challenge_count: List[RestChallengeInfo] = None
     dungeon_cleared_area_id_list: List[int] = None
     season_pack_rate: int = None

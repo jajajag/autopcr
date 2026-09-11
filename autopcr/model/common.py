@@ -1295,8 +1295,12 @@ class UserQuestInfo(BaseModel):
     result_type: int = None
     daily_clear_count: int = None
     daily_recovery_count: int = None
+class DungeonEnterAreaInfo(BaseModel):
+    dungeon_type: int = None
+    dungeon_area_id: int = None
 class DungeonInfo(BaseModel):
     enter_area_id: int = None
+    enter_area_info_list: List[DungeonEnterAreaInfo] = None
     rest_challenge_count: List[RestChallengeInfo] = None
 class TrainingQuestCount(BaseModel):
     gold_quest: int = None
