@@ -82,6 +82,17 @@ class ePromotionLevel(IntEnum):
     LEVEL_39 = 39
     LEVEL_40 = 40
 
+    @classmethod
+    def _missing_(cls, value):
+        # New ranks can reach the API before this enum is updated.
+        # Preserve their numeric value without accepting invalid sentinels.
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            member = int.__new__(cls, value)
+            member._name_ = f'LEVEL_{value}'
+            member._value_ = value
+            return cls._value2member_map_.setdefault(value, member)
+        return None
+
 class ePartyType(IntEnum):
     QUEST = 1
     ARENA = 2
