@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """把同目录 libil2cpp.so / global-metadata.dat 转为 rainbow_tw.json。
 运行：python3 decode_rainbow_tw.py（Python 3.10+，仅标准库）。
+可选：python3 decode_rainbow_tw.py /path/master.db → master.decoded.db。
+DB 模式使用客户端 snake_case 名称、不应用 aliases，保留原 DB 和 rainbow JSON。
 输出通过内置兼容规则恢复标准名称；不依赖旧映射或数据库。当前支持 IL2CPP v31 / ARM64。
 旧参考未覆盖的新名称保留客户端 snake_case；不能据此保证任意新增字段符合 ORM。
 地址、哈希和表数动态读取；格式或代码布局不支持时停止，保留旧 JSON。
@@ -15,6 +17,9 @@ import re
 import struct
 import sys
 import tempfile
+import argparse
+import sqlite3
+from contextlib import closing
 
 
 class Metadata:
@@ -594,16 +599,112 @@ def write_mapping(path, mapping):
             temporary.unlink()
 
 
+def decode_database(source, mapping):
+    """Decode a read-only input into a separate, atomically published copy."""
+    source = Path(source).resolve(strict=True)
+    output = source.with_name(source.stem + '.decoded.db')
+    names = {}
+    for table, columns in mapping.items():
+        for hashed, name in [(table, columns['--table_name']),
+                             *((h, n) for h, n in columns.items() if h != '--table_name')]:
+            if hashed in names and names[hashed] != name:
+                raise ValueError(f'冲突的哈希名称：{hashed}')
+            names[hashed] = name
+
+    # Replace SQL identifiers only, never string literals or comments.
+    tokens = re.compile(r"'[^']*(?:''[^']*)*'|--[^\n]*|/\*.*?\*/|"
+                        r'"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|[A-Za-z0-9_]+', re.S)
+
+    def restore(sql, kind):
+        depth, previous, constraint_depth, keyword = 0, 0, None, ''
+        def replace(match):
+            nonlocal depth, previous, constraint_depth, keyword
+            gap = sql[previous:match.start()]
+            depth += gap.count('(') - gap.count(')')
+            if constraint_depth is not None and depth < constraint_depth:
+                constraint_depth = None
+            if '(' in gap and keyword in ('KEY', 'UNIQUE'):
+                constraint_depth = depth
+            previous = match.end()
+            token = match[0]
+            if token.startswith(('--', '/*')):
+                return token
+            if token.startswith("'"):
+                # SQLite accepts legacy single-quoted table/column declarations.
+                # DEFAULT strings and expressions must remain literal values.
+                declaration = kind == 'table' and (depth == 0 or depth == constraint_depth
+                                                   or (depth == 1 and gap.strip() in ('(', ',')))
+                index_identifier = kind == 'index' and (keyword == 'ON'
+                                                        or (depth == 1 and gap.strip() in ('(', ',')))
+                if not (declaration or index_identifier):
+                    return token
+            if token[0] in ('"', '`', '[', "'"):
+                quote = token[0]
+                key = token[1:-1].replace(quote * 2, quote)
+            else:
+                key = token
+            keyword = token.upper()
+            return '"' + names[key].replace('"', '""') + '"' if key in names else token
+        return tokens.sub(replace, sql) if sql else sql
+
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=output.parent, suffix='.tmp', delete=False) as fp:
+            temporary = Path(fp.name)
+        with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)) as original:
+            with closing(sqlite3.connect(temporary)) as target:
+                original.backup(target)
+                rows = target.execute('SELECT rowid,type,name,tbl_name,sql FROM sqlite_master').fetchall()
+                matched = [name for _, kind, name, _, _ in rows if kind == 'table' and name in mapping]
+                if not matched:
+                    raise ValueError('DB 中没有匹配的哈希表；请使用同版本原始 DB，而非已经解码的 DB')
+                version = target.execute('PRAGMA schema_version').fetchone()[0]
+                target.execute('PRAGMA writable_schema=ON')
+                updates = []
+                for rowid, kind, name, table, sql in rows:
+                    new_name = names.get(name, name)
+                    if kind == 'index' and sql is None and name.startswith('sqlite_autoindex_' + table + '_'):
+                        new_name = 'sqlite_autoindex_' + names.get(table, table) + name[len('sqlite_autoindex_' + table):]
+                    updates.append((new_name, names.get(table, table), restore(sql, kind), rowid))
+                target.executemany('UPDATE sqlite_master SET name=?,tbl_name=?,sql=? WHERE rowid=?', updates)
+                target.execute(f'PRAGMA schema_version={version + 1}')
+                target.commit()
+                target.execute('PRAGMA writable_schema=OFF')
+        # A fresh connection must be able to parse and validate the new schema.
+        with closing(sqlite3.connect(temporary)) as target:
+            if target.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone():
+                target.executemany('UPDATE sqlite_sequence SET name=? WHERE name=?',
+                                   [(mapping[t]['--table_name'], t) for t in matched])
+            target.execute('ANALYZE')
+            target.commit()
+            check = target.execute('PRAGMA integrity_check').fetchall()
+            if check != [('ok',)]:
+                raise ValueError(f'解码后数据库完整性检查失败：{check[:5]}')
+        os.replace(temporary, output)
+        return output, len(matched)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
 def main():
+    parser = argparse.ArgumentParser(description='无参数生成带 aliases 的 rainbow_tw.json；传入原始 DB 则生成不带 aliases 的 *.decoded.db')
+    parser.add_argument('db', nargs='?', type=Path, help='与客户端版本匹配的原始哈希 SQLite DB')
+    args = parser.parse_args()
     directory = Path(__file__).resolve().parent
     try:
         metadata = Metadata(directory / 'global-metadata.dat')
         elf = Elf(directory / 'libil2cpp.so')
         evidence = {}
-        mapping = standard_names(analyze(NativeClient(elf, metadata), evidence=evidence), evidence)
+        mapping = analyze(NativeClient(elf, metadata), evidence=evidence)
+        if args.db is not None:
+            path, count = decode_database(args.db, mapping)
+            print(f'已生成 {path}：恢复 {count} 张表（客户端 snake_case 名称，不使用 aliases；未识别名称保留哈希）')
+            return 0
+        mapping = standard_names(mapping, evidence)
         path = directory / 'rainbow_tw.json'
         write_mapping(path, mapping)
-    except (OSError, ValueError, KeyError, IndexError, StopIteration, struct.error) as exc:
+    except (OSError, ValueError, KeyError, IndexError, StopIteration, struct.error, sqlite3.Error) as exc:
         print(f'解码失败，旧 rainbow_tw.json 保持不变：{exc}', file=sys.stderr)
         return 1
     print(f'已生成 {path}：{len(mapping)} 张表，'
