@@ -1,7 +1,4 @@
 from typing import Dict, List, Optional, Set, Tuple
-from pathlib import Path
-from tempfile import mkdtemp
-from ...constants import CACHE_DIR
 
 from ..modulebase import *
 from ..config import *
@@ -22,7 +19,7 @@ LABYRINTH_BLOCK_TYPE_NAME = {
 }
 
 
-@description('临时调试：按所选公会和难度进入、撤退10轮，将原始响应保存到cache/labyrinth_debug。已有开局会先撤退，忽略完美开局、Boss和重开上限设置。')
+@description('刷分用。若已进入黎明界，会立刻撤退。\n完美开局指一层双角色、二层双角色+遗物+EX+遗物/商店，三层角色+遗物+遗物/事件，四层双角色+双EX，五层遗物/事件+双EX。遗物固定分，事件分可高可低。')
 @name('黎明界刷开局')
 @LabyrinthBossConfig('labyrinth_reroll_area5_boss', '区域5Boss', 5, [301701, 310103, 319401, 315004])
 @LabyrinthBossConfig('labyrinth_reroll_area3_boss', '区域3Boss', 3, [301206, 312505, 319604])
@@ -65,8 +62,8 @@ class labyrinth_start_reroll(Module):
             2: {eLabyrinthBlockType.TICKET},
             3: {eLabyrinthBlockType.HARD_QUEST},
             4: {eLabyrinthBlockType.EVENT},
-            5: {eLabyrinthBlockType.HARD_QUEST},
-            6: {eLabyrinthBlockType.NORMAL_QUEST},
+            5: {eLabyrinthBlockType.NORMAL_QUEST, eLabyrinthBlockType.HARD_QUEST},
+            6: {eLabyrinthBlockType.NORMAL_QUEST, eLabyrinthBlockType.HARD_QUEST},
             7: {eLabyrinthBlockType.TICKET},
             8: {eLabyrinthBlockType.SHOP},
         },
@@ -184,6 +181,14 @@ class labyrinth_start_reroll(Module):
                 if perfect_start and self._block_type(block) not in expected_block_types[area][column]:
                     return None
 
+            # Area 4 columns 5/6 must contain one normal and one EX battle,
+            # in either order, on the same reachable route.
+            if perfect_start and area == 4 and column == 6:
+                if not path or {self._block_type(path[-1]), self._block_type(block)} != {
+                    eLabyrinthBlockType.NORMAL_QUEST, eLabyrinthBlockType.HARD_QUEST,
+                }:
+                    return None
+
             if column == last_column:
                 if eLabyrinthBlockType.BOSS_QUEST in expected[column] and not self._boss_matches(area, block, area3_bosses, area5_bosses):
                     return None
@@ -249,35 +254,6 @@ class labyrinth_start_reroll(Module):
         return f"区域{area}：" + "-".join(parts)
 
     async def do_task(self, client: pcrclient):
-        guild_id = self.get_config('labyrinth_reroll_guild_id')
-        difficulty = self.get_config('labyrinth_reroll_difficulty')
-        debug_root = Path(CACHE_DIR).resolve() / 'labyrinth_debug'
-        debug_root.mkdir(parents=True, exist_ok=True)
-        run_dir = Path(mkdtemp(prefix=f'guild{guild_id}_difficulty{difficulty}_', dir=debug_root))
-        response_path = run_dir / 'responses.jsonl'
-        self._log(f'调试响应保存到：{response_path}')
-        client._labyrinth_debug_path = str(response_path)
-        client._labyrinth_debug_round = 0
-        try:
-            top = await client.labyrinth_top()
-            if difficulty > self._max_unlocked_difficulty(top):
-                raise AbortError('未解锁所选黎明界难度')
-            if top.enter_id:
-                self._log('检测到已有开局，先撤退。')
-                await client.labyrinth_retire(top.enter_id)
-            for attempt in range(1, 11):
-                client._labyrinth_debug_round = attempt
-                enter = await client.labyrinth_enter(guild_id, difficulty)
-                if not enter.enter_id:
-                    raise AbortError('进入响应缺少enter_id，停止调试，请检查已保存的响应')
-                await client.labyrinth_retire(enter.enter_id)
-                await client.labyrinth_top()
-                self._log(f'调试进出完成：{attempt}/10')
-        finally:
-            client._labyrinth_debug_path = None
-            client._labyrinth_debug_round = 0
-
-    async def _do_reroll(self, client: pcrclient):
         guild_id: int = self.get_config('labyrinth_reroll_guild_id')
         difficulty: int = self.get_config('labyrinth_reroll_difficulty')
         area3_bosses: Set[int] = set(self.get_config('labyrinth_reroll_area3_boss'))
