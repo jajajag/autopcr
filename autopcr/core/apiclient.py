@@ -236,6 +236,16 @@ class apiclient(Container["apiclient"]):
 
         cls = request.__class__.__orig_bases__[0].__args__[0]
 
+        labyrinth_debug_path = getattr(self, '_labyrinth_debug_path', None)
+        if labyrinth_debug_path and request.url.startswith('labyrinth/'):
+            with open(labyrinth_debug_path, 'a', encoding='utf-8') as fp:
+                fp.write(json.dumps({
+                    'time': datetime.datetime.now().isoformat(),
+                    'round': getattr(self, '_labyrinth_debug_round', 0),
+                    'endpoint': request.url,
+                    'response': apiclient._safe_for_log(response0),
+                }, ensure_ascii=False) + '\n')
+
         response1 = apiclient._no_null_key(response0)
 
         if DEBUG_LOG:
