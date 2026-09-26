@@ -127,7 +127,7 @@ TW_HEADERS = {
     'REGION-CODE': '',
     # RES-VER is the asset/resource revision used by the HTTP protocol.  It is
     # independent from the master_tw.db revision published by database mirrors.
-    'RES-VER': os.getenv('AUTOPCR_TW_RES_VERSION', '00500030'),
+    'RES-VER': os.getenv('AUTOPCR_TW_RES_VERSION', '00610009'),
     'platform': '2',
 }
 
