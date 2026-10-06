@@ -13,7 +13,7 @@ from ..util import aiorequests
 from ..util.logger import instance as logger
 from .twasset import UNITYPY_LOCK
 
-UnityPy.config.FALLBACK_UNITY_VERSION = "2021.3.20f1"
+UnityPy.config.FALLBACK_UNITY_VERSION = "6000.0.58f2"
 
 AssetEntry = Tuple[str, str]
 AssetRegistry = Dict[str, AssetEntry]
