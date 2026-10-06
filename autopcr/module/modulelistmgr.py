@@ -68,6 +68,7 @@ TW_SUPPORTED_MODULES = {
 TW_UNSUPPORTED_MODULES = {
     # This request still has a known TW protocol mismatch.
     'monthly_gacha',
+    'travel_shop',
 }
 
 class ModuleListManager:
