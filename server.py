@@ -22,6 +22,7 @@ import aiofiles
 from io import BytesIO
 from PIL import Image
 import nonebot
+from hypercorn.config import Config as HypercornConfig
 from nonebot import on_startup
 import hoshino
 from hoshino import HoshinoBot, Service, priv, R
@@ -38,6 +39,10 @@ from .autopcr.constants import PUBLIC_ADDRESS as ENV_PUBLIC_ADDRESS, USE_HTTPS
 
 address = ENV_PUBLIC_ADDRESS or None  # 环境变量AUTOPCR_PUBLIC_ADDRESS，不填则会自动尝试获取
 useHttps = bool(USE_HTTPS)
+
+# Quart creates Hypercorn's config inside bot.run(); set its startup default
+# before serving so database initialization has up to 600 seconds to finish.
+HypercornConfig.startup_timeout = 600
 
 server = HttpServer(qq_mod=True)
 app = nonebot.get_bot().server_app
