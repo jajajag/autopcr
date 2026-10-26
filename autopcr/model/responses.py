@@ -3732,6 +3732,7 @@ class MreBattleSkipResponse(ResponseBase):
     after_target_boss_info: MreBossInfo = None
     clear_reward_list: List[InventoryInfo] = None
     challenge_reward_list: List[InventoryInfo] = None
+    item_list: List[InventoryInfo] = None
     user_jewel: UserJewel = None
     user_gold: UserGold = None
     add_present_count: int = None
