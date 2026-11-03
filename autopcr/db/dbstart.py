@@ -8,7 +8,7 @@ import uuid
 import aiohttp
 import brotli
 
-from ..constants import CACHE_DIR, DATA_DIR
+from ..constants import CACHE_DIR, DATA_DIR, TW_HEADERS
 from ..core.apiclient import apiclient
 from ..core.datamgr import datamgr
 from ..core.sdkclient import account, platform
@@ -402,8 +402,7 @@ def _env_flag(name: str, default: bool) -> bool:
 
 def _tw_official_version(resource_version: object = None) -> str:
     return normalize_tw_resource_version(
-        resource_version
-        or os.getenv('AUTOPCR_TW_RES_VERSION', '00500030')
+        resource_version or TW_HEADERS['RES-VER']
     )
 
 
