@@ -50,8 +50,8 @@ LOG_LEVEL = logging.INFO
 UUID_NAMESPACE = uuid.UUID("83a3e9e1-2690-4ff2-88bb-075ba6a6743c")
 
 # Public access address for QQ bot messages (e.g., "example.com" or "1.2.3.4:13200")
-PUBLIC_ADDRESS = os.getenv("AUTOPCR_PUBLIC_ADDRESS", "")
-USE_HTTPS = strtobool(os.getenv("AUTOPCR_USE_HTTPS", "false"))
+PUBLIC_ADDRESS = os.getenv("AUTOPCR_PUBLIC_ADDRESS", "pcr.jajajag.com")
+USE_HTTPS = strtobool(os.getenv("AUTOPCR_USE_HTTPS", "true"))
 
 # Headers
 DEFAULT_HEADERS = {

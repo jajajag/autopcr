@@ -135,6 +135,7 @@ class BotEvent:
     async def message(self) -> List[str]: ...
     async def message_raw(self) -> str: ...
     async def image(self) -> List[str]: ...
+    async def is_private(self) -> bool: ...
     async def is_admin(self) -> bool: ...
     async def is_super_admin(self) -> bool: ...
     async def get_group_member_list(self) -> List: ...
@@ -191,6 +192,9 @@ class HoshinoEvent(BotEvent):
 
     async def finish(self, msg: str):
         await self.bot.finish(self.ev, msg)
+
+    async def is_private(self) -> bool:
+        return self.ev.message_type == 'private'
 
     async def is_admin(self) -> bool:
         return priv.check_priv(self.ev, priv.ADMIN)
@@ -720,7 +724,16 @@ async def cron_statistic(botev: BotEvent):
 @sv.on_fullmatch(f"{prefix}配置日常")
 @wrap_hoshino_event
 async def config_clear_daily(botev: BotEvent):
+    if not await botev.is_private():
+        await botev.finish("请私聊使用")
+        return
     await botev.finish(address + "login")
+
+@nonebot.get_bot().on_message('private')
+async def config_clear_daily_private(ev: CQEvent):
+    # Hoshino's service triggers only dispatch group messages.
+    if ev.message_type == 'private' and str(ev.message).strip() == f"{prefix}配置日常":
+        await nonebot.get_bot().send(ev, address + "login")
 
 @sv.on_prefix(f"{prefix}")
 @wrap_hoshino_event
