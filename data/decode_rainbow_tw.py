@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""把同目录 libil2cpp.so / global-metadata.dat 转为 rainbow_tw.json。
-运行：python3 decode_rainbow_tw.py（Python 3.10+，仅标准库）。
-可选：python3 decode_rainbow_tw.py /path/master.db → master.decoded.db。
-DB 模式使用客户端 snake_case 名称、不应用 aliases，保留原 DB 和 rainbow JSON。
-输出通过内置兼容规则恢复标准名称；不依赖旧映射或数据库。当前支持 IL2CPP v31 / ARM64。
-旧参考未覆盖的新名称保留客户端 snake_case；不能据此保证任意新增字段符合 ORM。
-地址、哈希和表数动态读取；格式或代码布局不支持时停止，保留旧 JSON。
+"""从 APK / XAPK / APKS 生成 rainbow_tw.json（IL2CPP v31，ARM32 / ARM64）。
+python -m pip install 'capstone>=5,<6'
+python data/decode_rainbow_tw.py client.xapk
+python data/decode_rainbow_tw.py client.apks --db master.db
+省略安装包时，在当前目录、脚本目录及项目根目录寻找唯一安装包。
+DB 模式生成 *.decoded.db，使用客户端 snake_case 名称、不应用 aliases。
+JSON 使用内置兼容名称；新字段保留客户端 snake_case，失败时保留原输出。
 """
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["capstone>=5,<6"]
+# ///
 
 from pathlib import Path
 from collections import defaultdict, deque
@@ -19,12 +23,64 @@ import sys
 import tempfile
 import argparse
 import sqlite3
+import shutil
 from contextlib import closing
+from zipfile import ZipFile, BadZipFile
+
+
+ABIS = ('arm64-v8a', 'armeabi-v7a')
+
+
+def find_package():
+    directory = Path(__file__).resolve().parent
+    candidates = {p.resolve() for root in (Path.cwd(), directory, directory.parent)
+                  for p in root.iterdir() if p.is_file() and p.suffix.lower() in ('.apk', '.xapk', '.apks')}
+    if len(candidates) != 1:
+        raise ValueError(f'找到 {len(candidates)} 个安装包，请显式传入 APK / XAPK / APKS 路径')
+    return candidates.pop()
+
+
+def load_package(path, abi=None):
+    """Read only required ZIP members; nested split APKs never extract to caller paths."""
+    metadata, libraries = None, {}
+    native_paths = {f'lib/{a}/libil2cpp.so' for a in ABIS if abi is None or a == abi}
+
+    def collect(apk):
+        nonlocal metadata
+        for item in apk.infolist():
+            name = item.filename
+            if name.endswith('/global-metadata.dat'):
+                data = apk.read(item)
+                if metadata is not None and metadata != data:
+                    raise ValueError('包内包含不同的 metadata；请使用单一客户端版本的安装包')
+                metadata = data
+            elif name in native_paths:
+                architecture, data = name.split('/')[1], apk.read(item)
+                if architecture in libraries and libraries[architecture] != data:
+                    raise ValueError(f'包内存在多个不同的 {architecture} 库；请使用单一客户端版本的安装包')
+                libraries[architecture] = data
+
+    with ZipFile(path) as archive:
+        collect(archive)
+        for item in archive.infolist():
+            if not item.filename.lower().endswith('.apk'):
+                continue
+            with archive.open(item) as source, tempfile.SpooledTemporaryFile(max_size=8 << 20) as temporary:
+                shutil.copyfileobj(source, temporary)
+                temporary.seek(0)
+                with ZipFile(temporary) as apk:
+                    collect(apk)
+    if metadata is None:
+        raise ValueError('包内未找到 global-metadata.dat')
+    selected = next((a for a in ABIS if a in libraries), None)
+    if selected is None:
+        raise ValueError(f'包内未找到 {abi or "ARM32 / ARM64"} 的 libil2cpp.so')
+    return libraries[selected], metadata, selected
 
 
 class Metadata:
-    def __init__(self, path):
-        self.data = Path(path).read_bytes()
+    def __init__(self, source):
+        self.data = source if isinstance(source, bytes) else Path(source).read_bytes()
         self.header = struct.unpack_from('<64I', self.data)
         if self.header[:2] != (0xFAB11BAF, 31):
             raise ValueError('Expected unencrypted IL2CPP metadata version 31')
@@ -34,7 +90,6 @@ class Metadata:
         self.types = self.records(40, '<16i8H2I')
         self.fields = self.records(24, '<IiI')
         self.methods = self.records(12, '<7i4H')
-        self.properties = self.records(10, '<5I')
         self.defaults = {f: (t, d) for f, t, d in self.records(16, '<iii')}
         self.nested = [v[0] for v in self.records(32, '<i')]
         self.literals = []
@@ -79,24 +134,32 @@ class Metadata:
 def snake(name):
     name = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', name)
     return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name).lower()
-
-
-
 class Elf:
-    def __init__(self, path):
-        self.data = Path(path).read_bytes()
-        if self.data[:6] != b'\x7fELF\x02\x01' or struct.unpack_from('<H', self.data, 18)[0] != 183:
-            raise ValueError('Expected little-endian AArch64 ELF64')
-        start = struct.unpack_from('<Q', self.data, 40)[0]
-        size, count, strings_index = struct.unpack_from('<HHH', self.data, 58)
-        headers = [struct.unpack_from('<IIQQQQIIQQ', self.data, start + i * size) for i in range(count)]
-        strings = headers[strings_index]
-        strings = self.data[strings[4]:strings[4] + strings[5]]
-        self.sections = {strings[h[0]:strings.index(b'\0', h[0])].decode(): h for h in headers}
+    def __init__(self, source):
+        self.data = source if isinstance(source, bytes) else Path(source).read_bytes()
+        if self.data[:4] != b'\x7fELF' or self.data[5] != 1:
+            raise ValueError('Expected little-endian ARM ELF')
+        self.bits = {1: 32, 2: 64}[self.data[4]]
+        self.ptr = self.bits // 8
+        self.fmt = '<I' if self.bits == 32 else '<Q'
+        if struct.unpack_from('<H', self.data, 18)[0] != (40 if self.bits == 32 else 183):
+            raise ValueError('Only ARM32 / ARM64 are supported')
+        if self.bits == 32 and struct.unpack_from('<I', self.data, 36)[0] & 0x400:
+            raise ValueError('ARM32 hard-float ABI is not supported; expected Android softfp')
+        start = struct.unpack_from(self.fmt, self.data, 32 if self.bits == 32 else 40)[0]
+        size, count = struct.unpack_from('<HH', self.data, 46 if self.bits == 32 else 58)
+        headers = [struct.unpack_from('<10I' if self.bits == 32 else '<IIQQQQIIQQ', self.data, start + i * size)
+                   for i in range(count)]
         self.loaded = [h for h in headers if h[2] & 2 and h[1] != 8]
-        section = self.sections['.rela.dyn']
-        self.relocations = {address: addend for address, info, addend in struct.iter_unpack(
-            '<QQq', self.data[section[4]:section[4] + section[5]]) if info & 0xffffffff == 1027}
+        self.relocations = {}
+        for h in headers:
+            if h[1] not in (4, 9):  # SHT_RELA / SHT_REL
+                continue
+            fmt = ('<IIi' if h[1] == 4 else '<II') if self.bits == 32 else ('<QQq' if h[1] == 4 else '<QQ')
+            for row in struct.iter_unpack(fmt, self.data[h[4]:h[4] + h[5]]):
+                address, info = row[:2]
+                if info & (255 if self.bits == 32 else 0xffffffff) == (23 if self.bits == 32 else 1027):
+                    self.relocations[address] = row[2] if h[1] == 4 else self.unpack(address)
 
     def offset(self, address):
         for h in self.loaded:
@@ -104,26 +167,27 @@ class Elf:
                 return address - h[3] + h[4]
         raise ValueError(f'Address not in file-backed section: {address:#x}')
 
-    def u64(self, address):
+    def unpack(self, address):
+        return struct.unpack_from(self.fmt, self.data, self.offset(address))[0]
+
+    def pointer(self, address):
         if address in self.relocations:
             return self.relocations[address]
-        return struct.unpack_from('<Q', self.data, self.offset(address))[0]
+        return self.unpack(address)
 
     def code_module(self, name):
         pos = self.data.index(name.encode() + b'\0')
         address = next(pos - h[4] + h[3] for h in self.loaded if h[4] <= pos < h[4] + h[5])
         candidates = [a for a, v in self.relocations.items() if v == address]
-        valid = [(a, self.u64(a + 8), self.u64(a + 16)) for a in candidates
-                 if 0 < self.u64(a + 8) < 1000000]
+        valid = [(a, self.pointer(a + self.ptr), self.pointer(a + 2 * self.ptr)) for a in candidates
+                 if 0 < self.pointer(a + self.ptr) < 1000000]
         if len(valid) != 1:
             raise ValueError(f'Ambiguous code module: {valid}')
         return valid[0]
 
-    def words(self, address, count):
-        return struct.unpack_from('<' + 'I' * count, self.data, self.offset(address))
-
     def metadata_types(self, type_count):
-        needle = struct.pack('<Q', type_count)
+        p = self.ptr
+        needle = struct.pack(self.fmt, type_count)
         candidates = []
         for h in self.loaded:
             if h[2] & 4:
@@ -133,118 +197,84 @@ class Elf:
                 pos = self.data.find(needle, pos, h[4] + h[5])
                 if pos < 0:
                     break
-                if self.data[pos + 16:pos + 24] == needle:
+                if self.data[pos + 2 * p:pos + 3 * p] == needle:
                     candidates.append(pos - h[4] + h[3])
-                pos += 8
+                pos += p
         if len(candidates) != 1:
             raise ValueError(f'Ambiguous metadata registration: {candidates}')
         count_address = candidates[0]
-        count, pointer = self.u64(count_address - 32), self.u64(count_address - 24)
-        return [((self.u64(self.u64(pointer + i * 8) + 8) >> 16) & 255) for i in range(count)]
-
-
-def signed(value, bits):
-    return value - (1 << bits) if value & (1 << (bits - 1)) else value
-
-
-def decode(pc, word):
-    """Small, explicit instruction subset for readable inspection, not an emulator."""
-    rd, rn, rm = word & 31, (word >> 5) & 31, (word >> 16) & 31
-    sf = word >> 31
-    reg = 'x' if sf else 'w'
-    if word & 0xfc000000 in (0x94000000, 0x14000000):
-        return ('bl' if word & 0x80000000 else 'b', pc + signed(word & 0x3ffffff, 26) * 4)
-    if word == 0xd65f03c0:
-        return ('ret',)
-    if word & 0xffe0ffe0 in (0xaa0003e0, 0x2a0003e0):
-        return ('mov', f'{reg}{rd}', f'{reg}{rm}')
-    if word & 0x7f800000 in (0x52800000, 0x72800000, 0x12800000):
-        op = {0x52800000: 'movz', 0x72800000: 'movk', 0x12800000: 'movn'}[word & 0x7f800000]
-        return (op, f'{reg}{rd}', ((word >> 5) & 0xffff) << (((word >> 21) & 3) * 16))
-    if word & 0x1f000000 == 0x11000000:
-        imm = ((word >> 10) & 0xfff) << (12 if word & (1 << 22) else 0)
-        return ('sub' if word & (1 << 30) else 'add', f'{reg}{rd}', f'{reg}{rn}', imm)
-    if word & 0x9f000000 == 0x90000000:
-        imm = ((word >> 5) & 0x7ffff) * 4 + ((word >> 29) & 3)
-        return ('adrp', f'x{rd}', (pc & ~0xfff) + signed(imm, 21) * 4096)
-    if word & 0x3b000000 == 0x39000000:
-        size = word >> 30
-        dest = ('x' if size == 3 else 'w') + str(rd)
-        if word & (1 << 26):
-            dest = ('d' if size == 3 else 's') + str(rd)
-        return ('ldr' if word & (1 << 22) else 'str', dest, f'x{rn}', ((word >> 10) & 0xfff) << size)
-    if word & 0x3b200000 == 0x38000000:
-        size = word >> 30
-        dest = ('x' if size == 3 else 'w') + str(rd)
-        if word & (1 << 26):
-            dest = ('d' if size == 3 else 's') + str(rd)
-        mode = (word >> 10) & 3
-        return ('ldur' if word & (1 << 22) else 'stur', dest, f'x{rn}', signed((word >> 12) & 0x1ff, 9), mode)
-    if word & 0x3a000000 == 0x28000000:
-        size = 8 if word & (1 << (30 if word & (1 << 26) else 31)) else 4
-        prefix = 'x' if size == 8 else 'w'
-        if word & (1 << 26):
-            prefix = 'd' if size == 8 else 's'
-        return ('ldp' if word & (1 << 22) else 'stp', prefix + str(rd), prefix + str((word >> 10) & 31),
-                f'x{rn}', signed((word >> 15) & 127, 7) * size, (word >> 23) & 3)
-    if word & 0x7e000000 == 0x36000000:
-        return ('tbnz' if word & (1 << 24) else 'tbz', rd, pc + signed((word >> 5) & 0x3fff, 14) * 4)
-    if word & 0x7e000000 == 0x34000000:
-        return ('cbnz' if word & (1 << 24) else 'cbz', rd, pc + signed((word >> 5) & 0x7ffff, 19) * 4)
-    if word & 0xff000010 == 0x54000000:
-        return ('b.cond', word & 15, pc + signed((word >> 5) & 0x7ffff, 19) * 4)
-    if word & 0xfffffc00 in (0x1e604000, 0x1e204000):
-        prefix = 'd' if word & (1 << 22) else 's'
-        return ('mov', prefix + str(rd), prefix + str(rn))
-    if word & 0x7fe00c00 == 0x1a800400 and rn == 31 and rm == 31:
-        return ('cset', f'{reg}{rd}')
-    if word & 0x1f800000 == 0x12000000:
-        return ('logical_imm', f'{reg}{rd}', f'{reg}{rn}')
-    if word & 0x1f800000 == 0x13000000:
-        return ('bitfield', f'{reg}{rd}', f'{reg}{rn}')
-    if word & 0x1f000000 == 0x0a000000:
-        return ('logical_reg', f'{reg}{rd}', f'{reg}{rn}', f'{reg}{rm}')
-    if word == 0xd503201f:
-        return ('nop',)
-    return ('unknown', hex(word))
+        count, pointer = self.pointer(count_address - 4 * p), self.pointer(count_address - 3 * p)
+        return [(self.pointer(self.pointer(pointer + i * p) + p) >> 16) & 255 for i in range(count)]
 
 
 class NativeClient:
     def __init__(self, elf, metadata):
-        self.elf, self.metadata = elf, metadata
-        self.addresses = {}
-        self.names = {}
-        self.module_starts = {}
+        try:
+            import capstone as cs
+        except ImportError:
+            raise ValueError('请先安装反汇编依赖：python -m pip install "capstone>=5,<6"') from None
+        self.elf, self.metadata, self.cs = elf, metadata, cs
+        self.disassembler = cs.Cs(cs.CS_ARCH_ARM64 if elf.bits == 64 else cs.CS_ARCH_ARM, cs.CS_MODE_ARM)
+        self.disassembler.detail = True
+        self.disassembler.skipdata = True  # ARM methods can contain branched-over literal pools.
+        self.addresses, self.names, self.module_starts, self.targets = {}, {}, {}, {}
         self.type_kinds = elf.metadata_types(len(metadata.types))
         self.parameters = metadata.records(22, '<IIi')
-        # Find relevant assemblies by their types, not version-specific DLL names.
-        needed_types = {i for i, t in enumerate(metadata.types)
-                        if metadata.table_constant(i) or metadata.string(t[0]) == 'Query'}
+        needed = {i for i, t in enumerate(metadata.types)
+                  if metadata.table_constant(i) or metadata.string(t[0]) == 'Query'}
         for image in metadata.records(42, '<10i'):
-            name = metadata.string(image[0])
-            if not any(image[2] <= i < image[2] + image[3] for i in needed_types):
+            if not any(image[2] <= i < image[2] + image[3] for i in needed):
                 continue
-            _, count, pointer = elf.code_module(name)
-            pointers = [elf.u64(pointer + i * 8) for i in range(count)]
-            starts = sorted(set(pointers) - {0})
+            _, count, pointer = elf.code_module(metadata.string(image[0]))
+            pointers = [elf.pointer(pointer + i * elf.ptr) for i in range(count)]
+            starts = sorted({p & ~1 for p in pointers} - {0})
             for t in metadata.types[image[2]:image[2] + image[3]]:
                 for index in range(t[9], t[9] + t[16]):
-                    method = metadata.methods[index]
-                    addr = pointers[(method[6] & 0xffffff) - 1]
+                    addr = pointers[(metadata.methods[index][6] & 0xffffff) - 1]
                     self.addresses[index] = addr
-                    self.names[addr] = metadata.string(t[0]) + '.' + metadata.string(method[0])
+                    self.names[addr] = metadata.string(t[0]) + '.' + metadata.string(metadata.methods[index][0])
                     self.module_starts[index] = starts
-        self.readers = {addr: name.split('.')[-1] for addr, name in self.names.items()
+        self.readers = {self.call_target(addr): name.split('.')[-1] for addr, name in self.names.items()
                         if name in ('Query.GetInt', 'Query.GetLong', 'Query.GetDouble', 'Query.GetText')}
         if set(self.readers.values()) != {'GetInt', 'GetLong', 'GetDouble', 'GetText'}:
             raise ValueError('数据库读取方法不完整；客户端布局可能已变化')
 
+    def disassemble(self, address, size):
+        self.disassembler.mode = (self.cs.CS_MODE_THUMB if address & 1 else self.cs.CS_MODE_ARM)
+        offset = self.elf.offset(address & ~1)
+        return list(self.disassembler.disasm(self.elf.data[offset:offset + size], address & ~1))
+
     def instructions(self, index):
         address = self.addresses[index]
         starts = self.module_starts[index]
-        end = starts[bisect.bisect_right(starts, address)]
-        return {address + i * 4: (decode(address + i * 4, word), word)
-                for i, word in enumerate(self.elf.words(address, (end - address) // 4))}
+        next_index = bisect.bisect_right(starts, address & ~1)
+        end = starts[next_index] if next_index < len(starts) else next(
+            h[3] + h[5] for h in self.elf.loaded if h[3] <= (address & ~1) < h[3] + h[5])
+        return {ins.address: ins for ins in self.disassemble(address, end - (address & ~1)) if ins.id}
+
+    def call_target(self, address):
+        """Resolve direct branches and ARM linker veneers, without following method bodies."""
+        if address in self.targets:
+            return self.targets[address]
+        original, seen = address, set()
+        while address not in seen:
+            seen.add(address)
+            code = self.disassemble(address, 16)
+            if code and code[0].id and code[0].insn_name() == 'b' and code[0].cc in (0, 15):
+                address = code[0].operands[0].imm | (address & 1)
+            elif self.elf.bits == 32 and [i.mnemonic for i in code] == ['movw', 'movt', 'add', 'bx']:
+                a, b, c, d = [i.operands for i in code]
+                reg = code[0].reg_name(a[0].reg)
+                if (all(i.reg_name(o.reg) == reg for i, o in
+                        [(code[1], b[0]), (code[2], c[0]), (code[2], c[1]), (code[3], d[0])])
+                        and code[2].reg_name(c[2].reg) == 'pc'):
+                    address = (((b[1].imm << 16) | a[1].imm) + code[2].address + 8) & 0xffffffff
+                else:
+                    break
+            else:
+                break
+        self.targets[original] = address & ~1
+        return address & ~1
 
     def method_parameters(self, index):
         method = self.metadata.methods[index]
@@ -252,27 +282,112 @@ class NativeClient:
                 for p in self.parameters[method[4]:method[4] + method[-1]]]
 
     def trace_constructor(self, reader_index, ctor_index):
-        """Conservative symbolic dataflow on paths reaching a particular constructor.
-
-        Only primitive AAPCS64 arguments are supported. Unknown instructions
-        invalidate a path rather than allowing stale registers to look proven.
-        """
-        instructions = self.instructions(reader_index)
-        target = self.addresses[ctor_index]
-        sinks = {pc for pc, (ins, _) in instructions.items() if ins == ('bl', target)}
+        """Track query-column provenance through registers, stack slots and control-flow joins."""
+        code = self.instructions(reader_index)
+        target = self.call_target(self.addresses[ctor_index])
+        calls = {}
+        for pc, ins in code.items():
+            if ins.mnemonic in ('bl', 'blx') and ins.operands[0].type == 2:
+                thumb = self.elf.bits == 32 and bool(self.addresses[reader_index] & 1) != (ins.mnemonic == 'blx')
+                calls[pc] = self.call_target(ins.operands[0].imm | int(thumb))
+        sinks = {pc for pc, addr in calls.items() if addr == target}
         if not sinks:
             return {'error': 'constructor not directly called'}
+        arm32 = self.elf.bits == 32
+        # Capstone shares REG/IMM/MEM operand tags and EQ/NE/AL condition values.
+        def register_name(name):
+            name = {'sb': 'r9', 'sl': 'r10', 'fp': 'r11' if arm32 else 'x29',
+                    'ip': 'r12', 'lr': 'r14' if arm32 else 'x30'}.get(name, name)
+            if name.startswith(('w', 'x')) and name[1:].isdigit():
+                name = 'r' + name[1:]
+            if not arm32 and name.startswith('s') and name[1:].isdigit():
+                name = 'd' + name[1:]
+            return name
+
+        def reg(ins, operand):
+            return register_name(ins.reg_name(operand.reg))
+
+        def get(state, ins, operand):
+            if operand.type == 2:
+                return operand.imm << getattr(operand.shift, 'value', 0)
+            if operand.type != 1:
+                return None
+            name = reg(ins, operand)
+            if name in ('xzr', 'wzr'):
+                return 0
+            if name == 'pc':
+                return (ins.address + (4 if ins.size == 2 or self.addresses[reader_index] & 1 else 8)) & ~3
+            value = state.get(name)
+            if getattr(operand.shift, 'value', 0):
+                return value if column(value) else None
+            return value
+
+        def put(state, ins, operand, value):
+            name = reg(ins, operand)
+            if name not in ('xzr', 'wzr'):
+                if value is None:
+                    state.pop(name, None)
+                else:
+                    state[name] = value
+
+        def column(value):
+            return isinstance(value, tuple) and value[0] == 'column'
+
+        def add(value, delta):
+            if not isinstance(delta, int):
+                return None
+            if isinstance(value, int):
+                return value + delta
+            return ('stack', value[1] + delta) if isinstance(value, tuple) and value[0] == 'stack' else None
+
+        def load(state, address, size):
+            if not (isinstance(address, tuple) and address[0] == 'stack'):
+                return None
+            cells = [state.get(('mem', address[1] + n)) for n in range(0, size, 4)]
+            return cells[0] if cells and all(c == cells[0] for c in cells) else None
+
+        def store(state, address, value, size):
+            if isinstance(address, tuple) and address[0] == 'stack':
+                for n in range(0, size, 4):
+                    key = ('mem', address[1] + n)
+                    if value is None:
+                        state.pop(key, None)
+                    else:
+                        state[key] = value
+
+        def width(ins, operand):
+            name = ins.reg_name(operand.reg)
+            return 8 if name.startswith(('x', 'd')) or (not arm32 and name in ('fp', 'lr', 'sp')) else 4
+
+        def condition(state, cc):
+            if cc in (0, 15):
+                return True
+            a, b = state.get('flags', (None, None))
+            equal = None
+            if isinstance(a, int) and isinstance(b, int):
+                equal = a == b
+            elif a is not None and a == b:
+                equal = True
+            if (a == ('query',) and b == 0) or (b == ('query',) and a == 0):
+                equal = False
+            if cc == 1:
+                return equal
+            return not equal if cc == 2 and equal is not None else None
+
         edges, reverse = {}, defaultdict(set)
-        for pc, (ins, _) in instructions.items():
-            if pc in sinks or ins[0] == 'ret':
+        for pc, ins in code.items():
+            op = ins.insn_name()
+            if pc in sinks or op in ('ret', 'bx') or (op == 'pop' and 'pc' in ins.op_str):
                 nxt = []
-            elif ins[0] == 'b':
-                nxt = [ins[1]]
-            elif ins[0] in ('cbz', 'cbnz', 'tbz', 'tbnz', 'b.cond'):
-                nxt = [pc + 4, ins[-1]]
+            elif op == 'b':
+                nxt = [ins.operands[0].imm]
+                if ins.cc not in (0, 15):
+                    nxt.append(pc + ins.size)
+            elif op in ('cbz', 'cbnz', 'tbz', 'tbnz'):
+                nxt = [ins.operands[-1].imm, pc + ins.size]
             else:
-                nxt = [pc + 4]
-            edges[pc] = [p for p in nxt if p in instructions]
+                nxt = [pc + ins.size]
+            edges[pc] = [p for p in nxt if p in code]
             for p in edges[pc]:
                 reverse[p].add(pc)
         relevant, todo = set(sinks), list(sinks)
@@ -281,186 +396,181 @@ class NativeClient:
                 if pc not in relevant:
                     relevant.add(pc)
                     todo.append(pc)
-        start = min(instructions)
+        start = min(code)
         if start not in relevant:
             return {'error': 'no constructor path'}
-        # State stores only known values. At joins, retain equal values only.
-        initial = {'x1': ('query',), 'sp': ('stack', 0)}
-        states, queue, results = {start: initial}, deque([start]), {}
-        unknown, steps = set(), 0
+        states, queue, results, errors = {start: {'r1': ('query',), 'sp': ('stack', 0)}}, deque([start]), {}, set()
 
-        def key(reg):
-            return 'x' + reg[1:] if reg.startswith('w') else 'd' + reg[1:] if reg.startswith('s') else reg
-
-        def get(state, reg, base=False):
-            if reg in ('x31', 'w31'):
-                return state.get('sp') if base else 0
-            return state.get(key(reg))
-
-        def put(state, reg, value, base=False):
-            if reg in ('x31', 'w31') and not base:
-                return
-            k = 'sp' if reg in ('x31', 'w31') else key(reg)
-            if value is None:
-                state.pop(k, None)
-            else:
-                state[k] = value
-
-        def add(value, delta):
-            if isinstance(value, int):
-                return value + delta
-            if isinstance(value, tuple) and value[0] == 'stack':
-                return ('stack', value[1] + delta)
-            return None
-
-        def memory(state, base, delta, reg, load):
-            address = add(get(state, base, True), delta)
-            if not (isinstance(address, tuple) and address[0] == 'stack'):
-                if load:
-                    put(state, reg, None)
-                return
-            k = 'mem:' + str(address[1])
-            if load:
-                put(state, reg, state.get(k))
-            else:
-                value = get(state, reg)
-                if value is None:
-                    state.pop(k, None)
+        def arguments(state):
+            params, integer, floating, stack = [], 1, 0, 0
+            for name, kind in self.method_parameters(ctor_index):
+                if kind not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 28):
+                    raise ValueError(f'Unsupported constructor argument kind {kind}')
+                wide = kind in (10, 11, 13)
+                if not arm32 and kind in (12, 13) and floating < 8:
+                    value = state.get('d' + str(floating))
+                    floating += 1
                 else:
-                    state[k] = value
+                    size = 8 if not arm32 or wide else 4
+                    if arm32 and wide:
+                        integer = (integer + 1) & ~1
+                    limit = 4 if arm32 else 8
+                    if (arm32 or kind not in (12, 13)) and integer < limit:
+                        value = state.get('r' + str(integer))
+                        if arm32 and wide and state.get('r' + str(integer + 1)) != value:
+                            value = None
+                        integer += size // self.elf.ptr
+                    else:
+                        stack = (stack + size - 1) & -size
+                        value = load(state, add(state.get('sp'), stack), size)
+                        stack += size
+                params.append({'parameter': name, 'query_column': value[1] if column(value) else None})
+            return params
 
+        steps = 0
         while queue:
             pc = queue.popleft()
             state = dict(states[pc])
             steps += 1
             if steps > 100000:
                 return {'error': 'dataflow iteration limit'}
-            ins, word = instructions[pc]
-            op = ins[0]
+            ins, successors = code[pc], edges[pc]
+            op, operands = ins.mnemonic, ins.operands
             if pc in sinks:
-                params, integer, floating, stack = [], 1, 0, 0
-                for name, kind in self.method_parameters(ctor_index):
-                    if kind in (12, 13):
-                        if floating < 8:
-                            value = get(state, 'd' + str(floating))
-                            floating += 1
-                        else:
-                            sp = get(state, 'x31', True)
-                            value = state.get('mem:' + str(sp[1] + stack)) if sp else None
-                            stack += 8
-                    elif kind in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 18, 28):
-                        if integer < 8:
-                            value = get(state, 'x' + str(integer))
-                            integer += 1
-                        else:
-                            sp = get(state, 'x31', True)
-                            value = state.get('mem:' + str(sp[1] + stack)) if sp else None
-                            stack += 8
+                results[pc] = arguments(state)
+                continue
+            execute = condition(state, ins.cc) if arm32 else True
+            # ARM predicates are suffixes; ARM64 encodes conditions on branches/selects only.
+            base = ins.insn_name()
+            before = dict(state)
+            values = [get(state, ins, o) for o in operands]
+            if execute is not False:
+                if base in ('mov', 'movw', 'movz', 'movn', 'movk', 'movt', 'fmov'):
+                    value = values[1]
+                    if base in ('movt', 'movk'):
+                        old = values[0]
+                        shift = 16 if base == 'movt' else operands[1].shift.value
+                        value = ((old & ~(0xffff << shift)) | (value << 16 if base == 'movt' else value)) if isinstance(old, int) else None
+                    elif base == 'movn':
+                        value = ~value
+                    if execute is None and isinstance(value, int) and value in (0, 1):
+                        a, b = state.get('flags', (None, None))
+                        if column(a) and b == 0 and values[0] == 1 - value:
+                            value = a
+                            before[reg(ins, operands[0])] = value
+                    put(state, ins, operands[0], value)
+                elif base == 'vmov':
+                    if len(operands) == 2:
+                        put(state, ins, operands[0], values[1])
+                    elif reg(ins, operands[0]).startswith('d'):
+                        put(state, ins, operands[0], values[1] if values[1] == values[2] else None)
                     else:
-                        return {'error': f'unsupported constructor argument kind {kind}'}
-                    params.append({'parameter': name, 'query_column': value[1] if isinstance(value, tuple) and value[0] == 'column' else None})
-                results[pc] = params
-                continue
-            if op == 'unknown':
-                unknown.add((pc, hex(word)))
-                continue
-            if op == 'mov':
-                put(state, ins[1], get(state, ins[2]))
-            elif op in ('movz', 'movn', 'movk'):
-                value = ins[2] if op == 'movz' else ~ins[2] if op == 'movn' else None
-                put(state, ins[1], value)
-            elif op == 'adrp':
-                put(state, ins[1], ins[2])
-            elif op in ('add', 'sub'):
-                value = get(state, ins[2], True)
-                if word & (1 << 29):
-                    state.pop('flags', None)
-                    if isinstance(value, tuple) and value[0] == 'column':
-                        state['flags'] = value
-                if not (word & (1 << 29) and ins[1] in ('x31', 'w31')):
-                    put(state, ins[1], add(value, ins[3] if op == 'add' else -ins[3]), True)
-            elif op == 'cset':
-                put(state, ins[1], state.get('flags'))
-            elif op in ('logical_imm', 'bitfield'):
-                # Preserve source provenance through scalar masks/extensions.
-                # BFM merges destination bits and cannot be treated this way.
-                value = get(state, ins[2])
-                if op == 'bitfield' and (word >> 29) & 3 == 1:
-                    value = None
-                put(state, ins[1], value if isinstance(value, tuple) and value[0] == 'column' else None)
-                if op == 'logical_imm' and (word >> 29) & 3 == 3:
-                    state.pop('flags', None)
-            elif op == 'logical_reg':
-                # Composite cache keys are not a single database field.
-                put(state, ins[1], None)
-                if (word >> 29) & 3 == 3:
-                    state.pop('flags', None)
-            elif op in ('ldr', 'str', 'ldur', 'stur'):
-                delta = ins[3]
-                mode = ins[4] if len(ins) > 4 else 0
-                if mode == 3:
-                    put(state, ins[2], add(get(state, ins[2], True), delta), True)
+                        for o in operands[:2]:
+                            put(state, ins, o, values[2])
+                elif base in ('adr', 'adrp'):
+                    put(state, ins, operands[0], values[1])
+                elif base in ('add', 'sub'):
+                    delta = values[2]
+                    if base == 'sub':
+                        delta = -delta if isinstance(delta, int) else None
+                    value = add(values[1], delta)
+                    if column(values[1]) and isinstance(values[2], int):
+                        value = values[1]
+                    put(state, ins, operands[0], value)
+                elif base in ('cmp', 'cmn', 'tst'):
+                    state['flags'] = (values[0], values[1])
+                elif base in ('cset', 'csetm'):
+                    a, b = state.get('flags', (None, None))
+                    put(state, ins, operands[0], a if column(a) and b == 0 else None)
+                elif base in ('and', 'ands', 'ubfx', 'sbfx', 'uxtb', 'uxth', 'sxtb', 'sxth', 'sxtw', 'lsl', 'lsr', 'asr', 'clz'):
+                    put(state, ins, operands[0], values[1] if column(values[1]) else None)
+                elif base in ('orr', 'eor', 'bic', 'bfi', 'bfxil', 'pkhbt'):
+                    put(state, ins, operands[0], None)
+                elif base.startswith(('ldr', 'str', 'ldur', 'stur', 'vldr', 'vstr')) or base in ('ldp', 'stp'):
+                    memory = next(o for o in operands if o.type == 3)
+                    regs = operands[:list(operands).index(memory)]
+                    name = register_name(ins.reg_name(memory.mem.base))
+                    address = add(state.get(name), memory.mem.disp) if not memory.mem.index else None
+                    if ins.writeback and ins.op_str.rstrip().endswith('!'):
+                        state[name] = address
                     delta = 0
-                memory(state, ins[2], 0 if mode == 1 else delta, ins[1], op in ('ldr', 'ldur'))
-                if mode == 1:
-                    put(state, ins[2], add(get(state, ins[2], True), delta), True)
-            elif op in ('ldp', 'stp'):
-                delta, mode = ins[4:]
-                if mode == 3:
-                    put(state, ins[3], add(get(state, ins[3], True), delta), True)
+                    for o in regs:
+                        size = width(ins, o)
+                        if base in ('ldrd', 'strd'):
+                            size = 4
+                        if 'ld' in base:
+                            put(state, ins, o, load(state, add(address, delta), size))
+                        else:
+                            store(state, add(address, delta), get(state, ins, o), size)
+                        delta += size
+                    if ins.writeback and operands[-1].type == 2:
+                        state[name] = add(state.get(name), operands[-1].imm)
+                elif base in ('push', 'vpush', 'pop', 'vpop') or base.startswith(('stm', 'ldm', 'vstm', 'vldm')):
+                    push, pop = base in ('push', 'vpush'), base in ('pop', 'vpop')
+                    name = 'sp' if push or pop else reg(ins, operands[0])
+                    regs = operands if push or pop else operands[1:]
+                    size = sum(width(ins, o) for o in regs)
+                    address = add(state.get(name), -size if push or 'db' in base else 4 if 'ib' in base else 0)
                     delta = 0
-                size = 8 if ins[1][0] in ('x', 'd') else 4
-                memory(state, ins[3], 0 if mode == 1 else delta, ins[1], op == 'ldp')
-                memory(state, ins[3], size if mode == 1 else delta + size, ins[2], op == 'ldp')
-                if mode == 1:
-                    put(state, ins[3], add(get(state, ins[3], True), delta), True)
-            elif op == 'bl':
-                column = get(state, 'x1')
-                is_query = get(state, 'x0') == ('query',)
-                # Unknown callees could modify stack storage passed by address.
-                escaped_stack = any(isinstance(get(state, 'x' + str(i)), tuple)
-                                    and get(state, 'x' + str(i))[0] == 'stack'
-                                    for i in range(8))
-                if ins[1] not in self.readers and escaped_stack:
-                    for k in list(state):
-                        if k.startswith('mem:'):
-                            del state[k]
-                for i in range(19):
-                    state.pop('x' + str(i), None)
-                for i in list(range(8)) + list(range(16, 32)):
-                    state.pop('d' + str(i), None)
-                state.pop('flags', None)
-                if ins[1] in self.readers and is_query and isinstance(column, int) and column >= 0:
-                    put(state, 'd0' if self.readers[ins[1]] == 'GetDouble' else 'x0', ('column', column))
-            for dest in edges[pc]:
+                    for o in regs:
+                        if pop or 'ldm' in base:
+                            put(state, ins, o, load(state, add(address, delta), width(ins, o)))
+                        else:
+                            store(state, add(address, delta), get(state, ins, o), width(ins, o))
+                        delta += width(ins, o)
+                    if push or pop or ins.writeback:
+                        state[name] = add(state.get(name), -size if push or 'db' in base else size)
+                elif pc in calls:
+                    addr, index = calls[pc], state.get('r1')
+                    is_query = state.get('r0') == ('query',)
+                    if addr not in self.readers and any(isinstance(state.get('r' + str(i)), tuple)
+                            and state['r' + str(i)][0] == 'stack' for i in range(4 if arm32 else 8)):
+                        state = {k: v for k, v in state.items() if not isinstance(k, tuple)}
+                    for name in [*('r' + str(i) for i in ([0, 1, 2, 3, 12, 14] if arm32 else range(19))),
+                                 *('d' + str(i) for i in [*range(8), *range(16, 32)]), 'flags']:
+                        state.pop(name, None)
+                    if addr in self.readers and is_query and isinstance(index, int) and index >= 0:
+                        value = ('column', index)
+                        state['d0' if not arm32 and self.readers[addr] == 'GetDouble' else 'r0'] = value
+                        if arm32 and self.readers[addr] in ('GetLong', 'GetDouble'):
+                            state['r1'] = value
+                elif base not in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz', 'nop', 'ret', 'bx'):
+                    errors.add(f'{pc:#x}: {op} {ins.op_str}')
+                    continue
+                if getattr(ins, 'update_flags', False) and base not in ('cmp', 'cmn', 'tst'):
+                    state.pop('flags', None)
+                if execute is None:
+                    state = {k: v for k, v in state.items() if before.get(k) == v}
+            if base == 'b':
+                branch = condition(before, ins.cc)
+                if branch is not None:
+                    successors = [ins.operands[0].imm] if branch else [pc + ins.size]
+            elif base in ('cbz', 'cbnz'):
+                value = values[0]
+                if value == ('query',) or isinstance(value, int):
+                    zero = value == 0
+                    successors = [operands[-1].imm] if zero == (base == 'cbz') else [pc + ins.size]
+            for dest in successors:
                 if dest not in relevant:
                     continue
-                if dest not in states:
-                    states[dest] = dict(state)
+                joined = {k: v for k, v in states[dest].items() if k in state and state[k] == v} if dest in states else state
+                if dest not in states or joined != states[dest]:
+                    states[dest] = dict(joined)
                     queue.append(dest)
-                else:
-                    joined = {k: v for k, v in states[dest].items() if k in state and state[k] == v}
-                    if joined != states[dest]:
-                        states[dest] = joined
-                        queue.append(dest)
-        if unknown:
-            return {'error': 'unsupported instructions on constructor path', 'instructions': sorted(unknown)}
-        if not results:
-            return {'error': 'no analyzed constructor call'}
+        if errors or not results:
+            return {'error': 'unsupported constructor path', 'instructions': sorted(errors)}
         values = list(results.values())
         if any(v != values[0] for v in values):
             return {'error': 'different constructor calls disagree'}
         return {'reader_address': self.addresses[reader_index], 'constructor_address': target,
-                'constructor_calls': sorted(results), 'parameters': values[0]}
-
+                'parameters': values[0]}
 
 
 def analyze(client, *, evidence=None):
-    """Build client-named mappings using only the two client files."""
+    """Build mappings from native argument provenance and metadata SQL projections."""
     metadata = client.metadata
     projections = metadata.queries()
     output, failures = {}, {}
-    null_flags = 0
     for index, t in enumerate(metadata.types):
         table = metadata.table_constant(index)
         if not table:
@@ -503,7 +613,6 @@ def analyze(client, *, evidence=None):
                 'reader_address': result['reader_address'],
                 'constructor_address': result['constructor_address'],
             }
-        null_flags += sum(p['query_column'] is None for p in parameters)
     real_names = [v['--table_name'] for v in output.values()]
     if len(set(real_names)) != len(real_names):
         raise ValueError('Normalized table names collide')
@@ -511,7 +620,7 @@ def analyze(client, *, evidence=None):
         details = json.dumps(failures, ensure_ascii=False)
         raise ValueError(f"{len(failures)} 张客户端表未能可靠解析；不覆盖旧 JSON。详情：{details[:2000]}")
     if not output:
-        raise ValueError("没有提取到表；请检查两个文件是否来自同一受支持版本")
+        raise ValueError('没有提取到表；请检查安装包是否为受支持的客户端版本')
     return output
 
 
@@ -688,24 +797,34 @@ def decode_database(source, mapping):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='无参数生成带 aliases 的 rainbow_tw.json；传入原始 DB 则生成不带 aliases 的 *.decoded.db')
-    parser.add_argument('db', nargs='?', type=Path, help='与客户端版本匹配的原始哈希 SQLite DB')
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('package', nargs='?', type=Path, help='APK / XAPK / APKS；省略则自动寻找唯一安装包')
+    parser.add_argument('--db', type=Path, help='解码同版本原始哈希 SQLite DB，生成 *.decoded.db')
+    parser.add_argument('--abi', choices=ABIS, help='指定架构；默认优先 ARM64，其次 ARM32')
+    parser.add_argument('-o', '--output', type=Path, help='JSON 输出路径；默认 data/rainbow_tw.json')
     args = parser.parse_args()
+    if args.db and args.output:
+        parser.error('--db 与 --output 不能同时使用')
     directory = Path(__file__).resolve().parent
     try:
-        metadata = Metadata(directory / 'global-metadata.dat')
-        elf = Elf(directory / 'libil2cpp.so')
+        package = args.package if args.package is not None else find_package()
+        native, metadata, abi = load_package(package, args.abi)
+        elf = Elf(native)
+        if elf.bits != (64 if abi == 'arm64-v8a' else 32):
+            raise ValueError(f'{abi} 与库的 ELF 架构不匹配')
+        client = NativeClient(elf, Metadata(metadata))
+        print(f'读取 {package}（{abi}）')
         evidence = {}
-        mapping = analyze(NativeClient(elf, metadata), evidence=evidence)
+        mapping = analyze(client, evidence=evidence)
         if args.db is not None:
             path, count = decode_database(args.db, mapping)
             print(f'已生成 {path}：恢复 {count} 张表（客户端 snake_case 名称，不使用 aliases；未识别名称保留哈希）')
             return 0
         mapping = standard_names(mapping, evidence)
-        path = directory / 'rainbow_tw.json'
+        path = args.output or directory / 'rainbow_tw.json'
         write_mapping(path, mapping)
-    except (OSError, ValueError, KeyError, IndexError, StopIteration, struct.error, sqlite3.Error) as exc:
-        print(f'解码失败，旧 rainbow_tw.json 保持不变：{exc}', file=sys.stderr)
+    except (OSError, ValueError, KeyError, IndexError, StopIteration, struct.error, sqlite3.Error, BadZipFile) as exc:
+        print(f'解码失败，原输出保持不变：{exc}', file=sys.stderr)
         return 1
     print(f'已生成 {path}：{len(mapping)} 张表，'
           f'{sum(len(v) - 1 for v in mapping.values())} 个字段（已应用标准名称兼容规则）')
