@@ -23,16 +23,10 @@ MANIFEST_CATEGORY = "AssetBundles/Android"
 ROOT_MANIFEST = "manifest/manifest_assetmanifest"
 
 
-def _load_database(payload: bytes) -> bytes:
+def _load_bundle(payload: bytes):
+    # Loading consumes UnityPy's global version/key; object reads use file-local state.
     with UNITYPY_LOCK:
-        ab = UnityPy.load(payload)
-        asset = ab.objects[0].read()
-        script = getattr(asset, "m_Script", getattr(asset, "script", None))
-        if isinstance(script, str):
-            return script.encode("utf-8", "surrogateescape")
-        if script is not None:
-            return bytes(script)
-        raise ValueError("master TextAsset contains no script payload")
+        return UnityPy.load(payload)
 
 
 def _load_texture(payload: bytes):
@@ -288,9 +282,10 @@ class assetmgr:
         return await (await aiorequests.get(download_url)).content
 
     async def db(self) -> bytes:
-        return _load_database(
-            await self.download('a/masterdata_master.unity3d')
-        )
+        ab = _load_bundle(await self.download('a/masterdata_master.unity3d'))
+        asset = ab.objects[0].read()
+        script = asset.script if hasattr(asset, "script") else asset.m_Script
+        return script.encode("utf-8", "surrogateescape") if isinstance(script, str) else script
 
     async def unit_icon(self, unit_id: int) -> bytes:
         return _load_texture(
