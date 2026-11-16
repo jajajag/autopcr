@@ -2,6 +2,7 @@ from collections import Counter
 from typing import Any, Callable, Coroutine, Dict, List, Tuple, Union
 from pathlib import Path
 import re
+from zhconv import convert
 
 from .autopcr.util import aiorequests
 from .autopcr.module.accountmgr import BATCHINFO, AccountBatch, TaskResultInfo
@@ -1021,8 +1022,9 @@ async def labyrinth_start_reroll(botev: BotEvent):
     guild_id = 0
     msg = await botev.message()
     try:
+        guild_name = convert(msg[0], 'zh-hans')
         for guild in db.labyrinth_enter_guild.values():
-            if msg[0] in guild.guild_name.replace(r"\n", ""):
+            if guild_name in convert(guild.guild_name.replace(r"\n", ""), 'zh-hans'):
                 guild_id = guild.guild_id
                 del msg[0]
                 break
