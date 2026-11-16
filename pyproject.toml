@@ -21,8 +21,7 @@ dependencies = [
     "quart-compress>=0.2.1,<0.3",
     "dataclasses-json>=0.6.4,<0.7",
     "pulp>=2.8.0,<3",
-    "gtlv>=0.1.2,<0.2",
-    "zhconv>=1.4.3,<1.5"
+    "gtlv>=0.1.2,<0.2"
 ]
 
 [build-system]
