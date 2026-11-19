@@ -422,7 +422,10 @@ class NativeClient:
                         integer += size // self.elf.ptr
                     else:
                         stack = (stack + size - 1) & -size
-                        value = load(state, add(state.get('sp'), stack), size)
+                        # AArch64 stack slots are at least eight bytes, but
+                        # a narrow scalar may leave the rest of its slot unwritten.
+                        value_size = 4 if not arm32 and not wide and kind not in (14, 18, 28) else size
+                        value = load(state, add(state.get('sp'), stack), value_size)
                         stack += size
                 params.append({'parameter': name, 'query_column': value[1] if column(value) else None})
             return params
@@ -481,7 +484,7 @@ class NativeClient:
                     state['flags'] = (values[0], values[1])
                 elif base in ('cset', 'csetm'):
                     a, b = state.get('flags', (None, None))
-                    put(state, ins, operands[0], a if column(a) and b == 0 else None)
+                    put(state, ins, operands[0], a if column(a) and isinstance(b, int) else None)
                 elif base in ('and', 'ands', 'ubfx', 'sbfx', 'uxtb', 'uxth', 'sxtb', 'sxth', 'sxtw', 'lsl', 'lsr', 'asr', 'clz'):
                     put(state, ins, operands[0], values[1] if column(values[1]) else None)
                 elif base in ('orr', 'eor', 'bic', 'bfi', 'bfxil', 'pkhbt'):
